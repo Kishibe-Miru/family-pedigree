@@ -4,19 +4,19 @@
 
 ## 当前版本
 
-当前 Git 主线中的 `app/` 目录为最新版：
+当前 Git 主线中的 `当前版本/` 目录为最新版：
 
 - 版本：5.0
 - 日期：2026-06-23
-- 入口文件：`app/index.html`
-- 详细说明：[`app/使用说明.md`](app/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.md)
+- 入口文件：`当前版本/index.html`
+- 详细说明：[`当前版本/使用说明.md`](%E5%BD%93%E5%89%8D%E7%89%88%E6%9C%AC/%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.md)
 
 ## 使用方式
 
 直接双击打开：
 
 ```text
-app/index.html
+当前版本/index.html
 ```
 
 推荐使用 Chrome、Edge 或 Firefox。
@@ -42,7 +42,7 @@ v4.8
 v5.0
 ```
 
-GitHub 主页面只保留 `app/` 作为当前最新版。旧版可以通过对应 tag 或 Release 查看。
+GitHub 主页面只保留 `当前版本/` 作为当前最新版。旧版可以通过对应 tag 或 Release 查看。
 
 ## 本地资料说明
 
