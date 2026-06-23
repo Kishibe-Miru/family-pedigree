@@ -231,7 +231,7 @@ kbd {
 .tag button { border: 0; background: rgba(31,75,184,.16); color: #1f4bb8; border-radius: 50%; width: 16px; height: 16px; font-size: 11px; line-height: 1; display: grid; place-items: center; }
 .tag button:hover { background: #1f4bb8; color: #fff; }
 
-.form-actions { display: flex; gap: 8px; margin-top: 4px; }
+.form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 
 /* scrollbars */
 .panel::-webkit-scrollbar { width: 8px; }

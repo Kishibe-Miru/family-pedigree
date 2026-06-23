@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>精神科遗传家族谱系图绘制工具 4.4</title>
+  <title>精神科遗传家族谱系图绘制工具 4.8</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -11,7 +11,7 @@
     <div class="brand">
       <span class="brand-mark">⌘</span>
       <div>
-        <h1>家族谱系图绘制工具 <span class="ver">4.4</span></h1>
+        <h1>家族谱系图绘制工具 <span class="ver">4.8</span></h1>
         <p id="projectMeta" class="brand-sub">未命名家系图 · 0 名成员</p>
       </div>
     </div>
@@ -118,7 +118,7 @@
               <option value="unaffected">未患病</option>
               <option value="affected">患病</option>
               <option value="suspected">疑似</option>
-              <option value="carrier">携带者 (·)</option>
+              <option value="carrier">携带者（纹理）</option>
               <option value="unknown">未知</option>
             </select>
           </label>
@@ -162,6 +162,7 @@
 
         <div class="form-actions">
           <button type="button" id="setProbandBtn" class="action-btn small">设为先证者</button>
+          <button type="button" id="clearManualBtn" class="action-btn small">取消固定位置</button>
           <button type="button" id="deletePersonBtn" class="action-btn small danger">删除成员</button>
         </div>
       </form>
@@ -169,7 +170,7 @@
   </main>
 
   <dialog id="historyDialog" class="history-dialog">
-    <h2 class="panel-title">家族史文字（可直接粘贴进病历）</h2>
+    <h2 class="panel-title">家族史结构化草稿（需临床复核）</h2>
     <textarea id="historyText" rows="14" readonly></textarea>
     <div class="form-actions">
       <button type="button" id="copyHistoryBtn" class="action-btn small">复制到剪贴板</button>

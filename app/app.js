@@ -1,18 +1,19 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 4.7
+   精神科遗传家族谱系图绘制工具 4.8
    纯前端、本地优先。本版新增：双胞胎（同卵/异卵）、携带者圆点、
    近亲婚配自动双线、拖动自由摆放开关、一键生成家族史文字。
    4.1：连线 T 形修复；新增"与已选成员结婚"连接已有节点为配偶；
         家族史不再把占位默认名当真名；删除孪生后清理孤立 twinGroup。
    4.2：固定同胞出生顺序；同胞小家庭整体平移；多配偶/半同胞婚配线避让。
    4.7：婚配线固定同代水平连接；同胞线仅覆盖子女范围并使用线路层避让。
+   4.8：稳定性修复：多配偶子女归属选择、独生子女断线、校验与撤销/存储修复。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "4.7";
+const VERSION = "4.8";
 
 // 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
 const PLACEHOLDER_NAMES = new Set([
@@ -47,6 +48,8 @@ const state = {
   linkMode: null,    // 连接配偶模式：{ sourceId }
   history: [],
   future: [],
+  formEditSnapshot: null,
+  storageFailed: false,
   genMap: new Map(),
   numberMap: new Map(),
   familyUnits: []
@@ -77,7 +80,7 @@ function cacheElements() {
     "optShowTitle", "canvasArea", "canvasWrap", "pedigreeSvg", "statusLine",
     "emptySelection", "personForm", "personName", "personSex", "personAffectedStatus",
     "personAge", "personBirthYear", "personDeceased", "personProband",
-    "diagnosisSelect", "diagnosisTags", "personNotes", "setProbandBtn", "deletePersonBtn",
+    "diagnosisSelect", "diagnosisTags", "personNotes", "setProbandBtn", "clearManualBtn", "deletePersonBtn",
     "addTwinBrotherBtn", "addTwinSisterBtn", "linkPartnerBtn", "optSnapDrag", "familyHistoryBtn",
     "historyDialog", "historyText", "copyHistoryBtn", "closeHistoryBtn",
     "identicalRow", "personIdentical"
@@ -104,6 +107,7 @@ function bindEvents() {
   els.optSnapDrag.addEventListener("change", () => { syncSettings(); });
   els.personIdentical.addEventListener("change", () => updateTwinType());
   els.setProbandBtn.addEventListener("click", setSelectedAsProband);
+  els.clearManualBtn.addEventListener("click", clearSelectedManualPosition);
   els.deletePersonBtn.addEventListener("click", deleteSelected);
 
   els.autoLayoutBtn.addEventListener("click", () => { pushHistory(); autoLayout(); refresh(); fitView(); setStatus("已自动排版"); });
@@ -128,6 +132,8 @@ function bindEvents() {
   els.personDeceased.addEventListener("change", () => updateFromForm(false));
   els.personProband.addEventListener("change", () => updateFromForm(false));
   els.diagnosisSelect.addEventListener("change", addDiagnosisFromSelect);
+  els.personForm.addEventListener("focusin", beginFormEdit);
+  els.personForm.addEventListener("focusout", commitFormEdit);
 
   // 画布交互
   els.pedigreeSvg.addEventListener("pointerdown", onCanvasPointerDown);
@@ -144,6 +150,7 @@ function bindEvents() {
 function createProject() {
   const now = new Date().toISOString();
   return {
+    schemaVersion: 1,
     version: VERSION,
     title: "家族谱系图",
     createdAt: now,
@@ -162,8 +169,12 @@ function makeId(prefix) {
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
+function nextPersonOrder() {
+  return state.project.people.reduce((max, p) => Math.max(max, Number.isFinite(p.order) ? p.order : 0), 0) + 1;
+}
+
 function createPerson(overrides = {}) {
-  const order = state.project.people.length + 1;
+  const order = Number.isFinite(overrides.order) ? overrides.order : nextPersonOrder();
   return {
     id: makeId("p"),
     name: "",
@@ -305,16 +316,42 @@ function connectPartners(aId, bId) {
 function addChild(sex) {
   const parent = requireSelection();
   if (!parent) return;
+  const coParent = chooseCoParentForChild(parent);
+  if (coParent === undefined) return;
   pushHistory();
   const label = sex === "male" ? "儿子" : sex === "female" ? "女儿" : "子女";
   const child = createPerson({ name: label, sex: sex || "unknown" });
   state.project.people.push(child);
   addRelationship({ type: "parentChild", parent: parent.id, child: child.id });
-  const partner = findPartners(parent.id)[0];
-  if (partner) addRelationship({ type: "parentChild", parent: partner.id, child: child.id });
+  if (coParent) addRelationship({ type: "parentChild", parent: coParent.id, child: child.id });
   state.selectedId = parent.id; // 光标保持在父/母，便于连续添加
   autoLayout(); refresh(); fitView();
-  setStatus(`已添加${label}`);
+  setStatus(coParent ? `已添加${label}，共同父母为 ${displayPersonName(parent)} 与 ${displayPersonName(coParent)}` : `已添加${label}（单亲 / 未知另一方）`);
+}
+
+function chooseCoParentForChild(parent) {
+  const partners = findPartners(parent.id);
+  if (partners.length === 0) return null;
+  if (partners.length === 1) return partners[0];
+  const choices = partners.map((p, i) => `${i + 1}. ${displayPersonName(p)}`).join("\n");
+  const answer = prompt(
+    `请选择新子女的共同父母：\n\n0. 单亲 / 未知另一方\n${choices}`,
+    "1"
+  );
+  if (answer === null) {
+    setStatus("已取消添加子女");
+    return undefined;
+  }
+  const n = Number(answer.trim());
+  if (n === 0) return null;
+  if (Number.isInteger(n) && n >= 1 && n <= partners.length) return partners[n - 1];
+  setStatus("共同父母选择无效，未添加子女");
+  return undefined;
+}
+
+function displayPersonName(p) {
+  if (!p) return "未知";
+  return realName(p) || p.name || state.numberMap.get(p.id) || p.id;
 }
 
 function addSibling(sex) {
@@ -403,6 +440,16 @@ function setSelectedAsProband() {
   setStatus("已设置先证者");
 }
 
+function clearSelectedManualPosition() {
+  const p = requireSelection();
+  if (!p) return;
+  if (!p.manual) { setStatus("当前成员未固定手动位置"); return; }
+  pushHistory();
+  p.manual = false;
+  autoLayout(); refresh(); fitView();
+  setStatus("已取消该成员的固定位置");
+}
+
 function updateFromForm(relayout) {
   const p = selectedPerson();
   if (!p) return;
@@ -420,10 +467,28 @@ function updateFromForm(relayout) {
   autosave();
 }
 
+function beginFormEdit() {
+  if (!selectedPerson() || state.formEditSnapshot) return;
+  state.formEditSnapshot = snapshot();
+}
+
+function commitFormEdit() {
+  if (!state.formEditSnapshot) return;
+  const before = state.formEditSnapshot;
+  state.formEditSnapshot = null;
+  if (before === snapshot()) return;
+  state.history.push(before);
+  if (state.history.length > 60) state.history.shift();
+  state.future = [];
+  updateButtons();
+}
+
 function addDiagnosisFromSelect() {
   const p = selectedPerson();
   const v = els.diagnosisSelect.value;
   if (!p || !v) return;
+  state.formEditSnapshot = null;
+  pushHistory();
   if (!p.diagnoses.includes(v)) p.diagnoses.push(v);
   els.diagnosisSelect.value = "";
   refresh();
@@ -432,6 +497,8 @@ function addDiagnosisFromSelect() {
 function removeDiagnosis(v) {
   const p = selectedPerson();
   if (!p) return;
+  state.formEditSnapshot = null;
+  pushHistory();
   p.diagnoses = p.diagnoses.filter((d) => d !== v);
   refresh();
   autosave();
@@ -691,6 +758,7 @@ function autoLayout() {
   // 同胞顺序重排会移动夫妻节点，需再次按血缘子女锚点收敛。
   alignFamilyChildAnchors(familyUnits, nodeOf, childrenOf, maxGen);
   resolveNodeOverlaps(nodes, childrenOf);
+  alignSingleParentOnlyChildren(familyUnits, nodeOf, childrenOf);
 
   /* 6. 写回成员坐标 */
   nodes.forEach((n) => {
@@ -709,6 +777,20 @@ function autoLayout() {
   manualPos.forEach((pos, id) => { const p = getPerson(id); if (p) { p.x = pos.x; p.y = pos.y; } });
   normalizeToOrigin();
   computeNumbering(gen);
+}
+
+function alignSingleParentOnlyChildren(familyUnits, nodeOf, childrenOf) {
+  familyUnits.forEach((u) => {
+    if (u.parentIds.length !== 1 || u.childIds.length !== 1) return;
+    const child = getPerson(u.childIds[0]);
+    if (child?.manual) return;
+    const parentNode = nodeOf.get(u.parentIds[0]);
+    const childNode = nodeOf.get(u.childIds[0]);
+    if (!parentNode || !childNode || parentNode === childNode) return;
+    const target = anchorXForMemberNode(parentNode, u.parentIds[0]);
+    const current = anchorXForMemberNode(childNode, u.childIds[0]);
+    moveNodeWithDescendants(childNode, target - current, childrenOf);
+  });
 }
 
 function anchorXForMemberNode(node, memberId) {
@@ -1033,7 +1115,7 @@ function drawRelationships(root) {
   fams.forEach((f) => {
     const sibY = f.childTopY - SIBSHIP_DROP + R - f.level * LEVEL_STEP;
     root.appendChild(svgEl("line", { x1: f.dropX, y1: f.dropTopY, x2: f.dropX, y2: sibY, class: "descent-line" }));
-    drawSiblingLine(root, f, sibY, fams);
+    drawSiblingConnector(root, f, sibY, fams);
     // 将子女按 twinGroup 分组：单胎从横线垂直下降；双胎从同一顶点斜线分叉
     const singles = [], twinGroups = new Map();
     f.u.children.forEach((c) => {
@@ -1062,6 +1144,19 @@ function drawRelationships(root) {
       }
     });
   });
+}
+
+function drawSiblingConnector(root, f, sibY, fams = []) {
+  if (f.u.children.length === 1) {
+    const only = f.u.children[0];
+    if (Math.abs(only.x - f.dropX) > 0.5) {
+      const x1 = Math.min(f.dropX, only.x);
+      const x2 = Math.max(f.dropX, only.x);
+      root.appendChild(svgEl("line", { x1, y1: sibY, x2, y2: sibY, class: "sibling-line" }));
+    }
+    return;
+  }
+  drawSiblingLine(root, f, sibY, fams);
 }
 
 function drawSiblingLine(root, f, sibY, fams = []) {
@@ -1268,13 +1363,54 @@ function drawLegend(root) {
 function contentBounds() {
   const people = state.project.people;
   if (people.length === 0) return { minX: 0, minY: 0, maxX: 600, maxY: 400, width: 600, height: 400 };
-  const xs = people.map((p) => p.x), ys = people.map((p) => p.y);
-  return {
-    minX: Math.min(...xs), minY: Math.min(...ys),
-    maxX: Math.max(...xs), maxY: Math.max(...ys),
-    width: Math.max(...xs) - Math.min(...xs),
-    height: Math.max(...ys) - Math.min(...ys)
-  };
+  const minXs = [], maxXs = [], minYs = [], maxYs = [];
+  people.forEach((p) => {
+    const labelWidth = estimatePersonTextWidth(p);
+    minXs.push(p.x - Math.max(R, labelWidth / 2));
+    maxXs.push(p.x + Math.max(R, labelWidth / 2));
+    minYs.push(p.y - R - 34);
+    maxYs.push(p.y + R + estimatePersonTextHeight(p));
+  });
+  if (state.project.settings.showTitle) {
+    const centerX = avg(people.map((p) => p.x));
+    const titleW = textWidth(state.project.title || "家族谱系图", 20, 1.1);
+    minXs.push(centerX - titleW / 2);
+    maxXs.push(centerX + titleW / 2);
+    minYs.push(Math.min(...people.map((p) => p.y)) - 135);
+  }
+  if (state.project.settings.showLegend) {
+    const maxX = Math.max(...people.map((p) => p.x));
+    minXs.push(maxX + 75);
+    maxXs.push(maxX + 75 + 225);
+  }
+  const minX = Math.min(...minXs), maxX = Math.max(...maxXs);
+  const minY = Math.min(...minYs), maxY = Math.max(...maxYs);
+  return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
+}
+
+function estimatePersonTextWidth(p) {
+  const widths = [];
+  const s = state.project.settings;
+  if (s.showName && p.name) widths.push(textWidth(p.name, 13));
+  if (s.showDiagnosis && p.diagnoses && p.diagnoses.length) widths.push(textWidth(p.diagnoses.slice(0, 3).join("、"), 11));
+  if (s.showAge) {
+    const meta = [p.age ? `${p.age}岁` : "", p.birthYear ? `${p.birthYear}年` : ""].filter(Boolean).join(" / ");
+    if (meta) widths.push(textWidth(meta, 11));
+  }
+  return Math.max(NODE_SIZE, ...widths);
+}
+
+function estimatePersonTextHeight(p) {
+  const s = state.project.settings;
+  let h = 16;
+  if (s.showName && p.name) h += 18;
+  if (s.showDiagnosis && p.diagnoses && p.diagnoses.length) h += 16;
+  if (s.showAge && (p.age || p.birthYear)) h += 14;
+  return h;
+}
+
+function textWidth(text, fontSize, factor = 0.62) {
+  return String(text || "").length * fontSize * factor;
 }
 
 /* ============================================================
@@ -1322,6 +1458,7 @@ function renderForm() {
   els.identicalRow.hidden = !p.twinGroup;
   els.personIdentical.checked = p.twinType === "identical";
   els.personNotes.value = p.notes || "";
+  els.clearManualBtn.disabled = !p.manual;
   els.diagnosisTags.innerHTML = "";
   p.diagnoses.forEach((d) => {
     const tag = document.createElement("span");
@@ -1341,6 +1478,7 @@ function updateButtons() {
    els.addSonBtn, els.addDaughterBtn, els.addTwinBrotherBtn, els.addTwinSisterBtn, els.linkPartnerBtn]
     .forEach((b) => (b.disabled = !has));
   if (els.linkPartnerBtn) els.linkPartnerBtn.classList.toggle("accent", Boolean(state.linkMode));
+  if (els.clearManualBtn) els.clearManualBtn.disabled = !has || !selectedPerson()?.manual;
   els.undoBtn.disabled = state.history.length === 0;
   els.redoBtn.disabled = state.future.length === 0;
   els.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
@@ -1495,9 +1633,9 @@ function fitKeep() { renderSvg(); }
 function onKeyDown(evt) {
   const tag = (evt.target.tagName || "").toLowerCase();
   const typing = tag === "input" || tag === "textarea" || tag === "select";
-  if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "z") { evt.preventDefault(); undo(); return; }
-  if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "y") { evt.preventDefault(); redo(); return; }
-  if ((evt.ctrlKey || evt.metaKey) && evt.shiftKey && evt.key.toLowerCase() === "z") { evt.preventDefault(); redo(); return; }
+  if ((evt.ctrlKey || evt.metaKey) && evt.shiftKey && evt.key.toLowerCase() === "z") { evt.preventDefault(); commitFormEdit(); redo(); return; }
+  if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "z") { evt.preventDefault(); commitFormEdit(); undo(); return; }
+  if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "y") { evt.preventDefault(); commitFormEdit(); redo(); return; }
   if (typing) return;
   const k = evt.key.toLowerCase();
   if (k === "f") { evt.preventDefault(); addParent("male"); }
@@ -1543,10 +1681,22 @@ function redo() {
    存档 / 读取 / 自动保存
    ============================================================ */
 function autosave() {
-  try { localStorage.setItem(AUTOSAVE_KEY, snapshot()); } catch (e) { /* ignore */ }
+  try {
+    localStorage.setItem(AUTOSAVE_KEY, snapshot());
+    state.storageFailed = false;
+  } catch (e) {
+    if (!state.storageFailed) setStatus("自动保存失败：浏览器本地存储不可用或容量不足，请手动保存 JSON");
+    state.storageFailed = true;
+  }
 }
 function restoreAutosave() {
-  const raw = localStorage.getItem(AUTOSAVE_KEY);
+  let raw = null;
+  try {
+    raw = localStorage.getItem(AUTOSAVE_KEY);
+  } catch (e) {
+    setStatus("自动恢复不可用：浏览器本地存储被禁用");
+    return false;
+  }
   if (!raw) return false;
   try {
     const proj = normalizeProject(JSON.parse(raw));
@@ -1556,7 +1706,11 @@ function restoreAutosave() {
     autoLayout();
     setStatus("已恢复上次自动保存");
     return true;
-  } catch (e) { localStorage.removeItem(AUTOSAVE_KEY); return false; }
+  } catch (e) {
+    try { localStorage.removeItem(AUTOSAVE_KEY); } catch (removeErr) { /* ignore */ }
+    setStatus("自动恢复数据无效，已跳过");
+    return false;
+  }
 }
 
 function newProject() {
@@ -1590,21 +1744,25 @@ function loadJson(evt) {
       applySettingsToUI();
       autoLayout(); refresh(); fitView();
       setStatus("项目已加载");
-    } catch (err) { setStatus("加载失败：文件格式不正确"); }
+    } catch (err) { setStatus(`加载失败：${err.message || "文件格式不正确"}`); }
     finally { evt.target.value = ""; }
   };
   reader.readAsText(file, "utf-8");
 }
 
 function normalizeProject(proj) {
-  if (!proj || !Array.isArray(proj.people) || !Array.isArray(proj.relationships)) throw new Error("invalid");
+  validateProjectData(proj);
   const base = createProject();
+  const migratedFrom = proj.version && proj.version !== VERSION ? proj.version : proj.migratedFrom;
   return {
     ...base,
     ...proj,
+    schemaVersion: 1,
+    version: VERSION,
+    ...(migratedFrom ? { migratedFrom } : {}),
     settings: { ...base.settings, ...(proj.settings || {}) },
     people: proj.people.map((p, i) => ({
-      ...createPerson(),
+      ...createPerson({ order: i + 1 }),
       ...p,
       diagnoses: Array.isArray(p.diagnoses) ? p.diagnoses : [],
       order: Number.isFinite(p.order) ? p.order : i + 1
@@ -1612,6 +1770,66 @@ function normalizeProject(proj) {
     relationships: proj.relationships,
     familyUnits: Array.isArray(proj.familyUnits) ? proj.familyUnits : []
   };
+}
+
+function validateProjectData(proj) {
+  if (!proj || !Array.isArray(proj.people) || !Array.isArray(proj.relationships)) throw new Error("invalid");
+  const ids = new Set();
+  proj.people.forEach((p, i) => {
+    if (!p || typeof p.id !== "string" || !p.id.trim()) throw new Error(`person id missing at ${i + 1}`);
+    if (ids.has(p.id)) throw new Error(`duplicate person id: ${p.id}`);
+    ids.add(p.id);
+    if (p.sex && !["male", "female", "unknown"].includes(p.sex)) throw new Error(`invalid sex: ${p.sex}`);
+    if (p.affectedStatus && !["unaffected", "affected", "suspected", "carrier", "unknown"].includes(p.affectedStatus)) {
+      throw new Error(`invalid affectedStatus: ${p.affectedStatus}`);
+    }
+  });
+
+  const probands = proj.people.filter((p) => p.proband);
+  if (probands.length > 1) throw new Error("multiple probands");
+
+  const relKeys = new Set();
+  const parentEdges = [];
+  proj.relationships.forEach((r, i) => {
+    if (!r || typeof r.type !== "string") throw new Error(`relationship type missing at ${i + 1}`);
+    if (r.type === "parentChild") {
+      if (!ids.has(r.parent) || !ids.has(r.child)) throw new Error(`broken parentChild reference at ${i + 1}`);
+      if (r.parent === r.child) throw new Error("person cannot be own parent");
+      const key = `parentChild:${r.parent}:${r.child}`;
+      if (relKeys.has(key)) throw new Error(`duplicate relationship: ${key}`);
+      relKeys.add(key);
+      parentEdges.push([r.parent, r.child]);
+    } else if (r.type === "partner") {
+      if (!ids.has(r.person1) || !ids.has(r.person2)) throw new Error(`broken partner reference at ${i + 1}`);
+      if (r.person1 === r.person2) throw new Error("person cannot be own partner");
+      const pair = [r.person1, r.person2].sort();
+      const key = `partner:${pair[0]}:${pair[1]}`;
+      if (relKeys.has(key)) throw new Error(`duplicate relationship: ${key}`);
+      relKeys.add(key);
+    } else {
+      throw new Error(`unknown relationship type: ${r.type}`);
+    }
+  });
+  assertNoParentCycle(parentEdges);
+}
+
+function assertNoParentCycle(edges) {
+  const graph = new Map();
+  edges.forEach(([parent, child]) => {
+    if (!graph.has(parent)) graph.set(parent, []);
+    graph.get(parent).push(child);
+  });
+  const visiting = new Set();
+  const done = new Set();
+  function visit(id) {
+    if (visiting.has(id)) throw new Error("parentChild cycle detected");
+    if (done.has(id)) return;
+    visiting.add(id);
+    (graph.get(id) || []).forEach(visit);
+    visiting.delete(id);
+    done.add(id);
+  }
+  [...graph.keys()].forEach(visit);
 }
 
 /* ============================================================
@@ -1795,15 +2013,21 @@ function relationTerm(probandId, id, degree) {
     // 父母的同胞 = 叔伯姑舅姨
     const parentSibs = findParents(probandId).flatMap((par) =>
       findParents(par.id).flatMap((gp) => findChildren(gp.id))).map((x) => x.id);
-    if (parentSibs.includes(id)) return (side ? side : "") + sexWord("叔伯", "姑姨", "二级亲属");
+    if (parentSibs.includes(id)) {
+      if (side === "父系") return sexWord("叔伯", "姑母", "父系二级亲属");
+      if (side === "母系") return sexWord("舅父", "姨母", "母系二级亲属");
+      return sexWord("叔伯/舅父", "姑姨", "二级亲属");
+    }
     return (side ? side : "") + sexWord("二级男性亲属", "二级女性亲属", "二级亲属");
   }
   return (side ? side : "") + `${degree}级亲属`;
 }
 
 function buildFamilyHistory() {
-  const proband = state.project.people.find((p) => p.proband) || state.project.people[0];
-  if (!proband) return "（暂无成员）";
+  const probands = state.project.people.filter((p) => p.proband);
+  if (state.project.people.length === 0) return "（暂无成员）";
+  if (probands.length !== 1) return "（请先设置且仅设置一名先证者后，再生成家族史结构化草稿。）";
+  const proband = probands[0];
   const affected = state.project.people
     .map((p) => ({ p, deg: p.id === proband.id ? 0 : clinicalDegree(proband.id, p.id) }))
     .filter((o) => o.p.id !== proband.id && o.deg != null &&
@@ -1813,7 +2037,7 @@ function buildFamilyHistory() {
   const pRealName = realName(proband);
   const pName = pRealName ? `（${pRealName}）` : "";
   const pDx = proband.diagnoses && proband.diagnoses.length ? proband.diagnoses.join("、") : (proband.affectedStatus === "affected" ? "（诊断未填写）" : "");
-  lines.push(`先证者${pName}${pDx ? "，临床诊断" + pDx : ""}。家系共纳入 ${total} 名成员。`);
+  lines.push(`家族史结构化草稿：先证者${pName}${pDx ? "，临床诊断" + pDx : ""}。家系共纳入 ${total} 名成员。`);
   if (affected.length === 0) {
     lines.push("除先证者外，家系内其余成员未记录精神障碍患病信息。");
   } else {
@@ -1832,8 +2056,9 @@ function buildFamilyHistory() {
       });
       lines.push(`${degName[d] || d + "级亲属"}中，${parts.join("；")}。`);
     });
-    lines.push(`家系内除先证者外共 ${affected.length} 名亲属受累，提示家族聚集性，建议结合遗传咨询进一步评估。`);
+    lines.push(`家系内除先证者外共 ${affected.length} 名亲属记录为患病或疑似。是否符合家族聚集性，需结合诊断依据、信息来源、发病年龄及临床人员复核后判断。`);
   }
+  lines.push("注：本段为结构化草稿，不替代临床复核；请补充信息来源、诊断依据、发病年龄、病程和资料缺失情况。");
   return lines.join("\n");
 }
 
