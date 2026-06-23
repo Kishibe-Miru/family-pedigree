@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>精神科遗传家族谱系图绘制工具 4.0</title>
+  <title>精神科遗传家族谱系图绘制工具 4.1</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -11,7 +11,7 @@
     <div class="brand">
       <span class="brand-mark">⌘</span>
       <div>
-        <h1>家族谱系图绘制工具 <span class="ver">4.0</span></h1>
+        <h1>家族谱系图绘制工具 <span class="ver">4.1</span></h1>
         <p id="projectMeta" class="brand-sub">未命名家系图 · 0 名成员</p>
       </div>
     </div>
@@ -51,7 +51,9 @@
           <button id="addDaughterBtn" class="action-btn" disabled>女儿 <kbd>D</kbd></button>
           <button id="addTwinBrotherBtn" class="action-btn" disabled>孪生兄弟</button>
           <button id="addTwinSisterBtn" class="action-btn" disabled>孪生姐妹</button>
+          <button id="linkPartnerBtn" class="action-btn span2" disabled title="点亮后在画布中点击另一位成员，将两人连为配偶（支持近亲婚配）">💍 与已选成员结婚（连接已有节点）</button>
         </div>
+        <p class="hint">「结婚」用于连接两个已存在的成员（如表兄妹婚配）；普通新增配偶请用上面的「配偶」按钮。</p>
       </section>
 
       <section class="panel-block">

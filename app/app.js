@@ -1,14 +1,26 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 4.0
+   精神科遗传家族谱系图绘制工具 4.1
    纯前端、本地优先。本版新增：双胞胎（同卵/异卵）、携带者圆点、
    近亲婚配自动双线、拖动自由摆放开关、一键生成家族史文字。
+   4.1：连线 T 形修复；新增"与已选成员结婚"连接已有节点为配偶；
+        家族史不再把占位默认名当真名；删除孪生后清理孤立 twinGroup。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "4.0";
+const VERSION = "4.1";
+
+// 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
+const PLACEHOLDER_NAMES = new Set([
+  "先证者", "父", "母", "兄弟", "姐妹", "儿子", "女儿", "子女", "同胞",
+  "配偶", "孪生兄弟", "孪生姐妹"
+]);
+function realName(p) {
+  if (!p || !p.name) return "";
+  return PLACEHOLDER_NAMES.has(p.name.trim()) ? "" : p.name.trim();
+}
 
 /* ---- 比例常量（以符号尺寸为基准，参考 NSGC/Bennett 规则）---- */
 const NODE_SIZE = 44;
@@ -30,6 +42,7 @@ const state = {
   offsetY: 0,
   drag: null,        // 拖动节点
   pan: null,         // 平移画布
+  linkMode: null,    // 连接配偶模式：{ sourceId }
   history: [],
   future: [],
   genMap: new Map(),
@@ -62,7 +75,7 @@ function cacheElements() {
     "emptySelection", "personForm", "personName", "personSex", "personAffectedStatus",
     "personAge", "personBirthYear", "personDeceased", "personProband",
     "diagnosisSelect", "diagnosisTags", "personNotes", "setProbandBtn", "deletePersonBtn",
-    "addTwinBrotherBtn", "addTwinSisterBtn", "optSnapDrag", "familyHistoryBtn",
+    "addTwinBrotherBtn", "addTwinSisterBtn", "linkPartnerBtn", "optSnapDrag", "familyHistoryBtn",
     "historyDialog", "historyText", "copyHistoryBtn", "closeHistoryBtn",
     "identicalRow", "personIdentical"
   ];
@@ -81,6 +94,7 @@ function bindEvents() {
   els.addDaughterBtn.addEventListener("click", () => addChild("female"));
   els.addTwinBrotherBtn.addEventListener("click", () => addTwin("male"));
   els.addTwinSisterBtn.addEventListener("click", () => addTwin("female"));
+  els.linkPartnerBtn.addEventListener("click", toggleLinkPartner);
   els.familyHistoryBtn.addEventListener("click", showFamilyHistory);
   els.copyHistoryBtn.addEventListener("click", copyFamilyHistory);
   els.closeHistoryBtn.addEventListener("click", () => els.historyDialog.close());
@@ -255,6 +269,35 @@ function addPartner() {
   setStatus("已添加配偶");
 }
 
+// 进入/退出「连接已有成员为配偶」模式：点亮后点击另一节点即建立配偶关系
+function toggleLinkPartner() {
+  if (state.linkMode) { state.linkMode = null; setStatus("已取消连接配偶"); refresh(false); return; }
+  const person = requireSelection();
+  if (!person) { setStatus("请先选中一位成员，再连接其配偶"); return; }
+  state.linkMode = { sourceId: person.id };
+  setStatus("连接配偶：请在画布中点击另一位成员（再次点击按钮取消）");
+  refresh(false);
+}
+
+// 将两个已存在成员连为配偶（带校验）
+function connectPartners(aId, bId) {
+  if (!aId || !bId || aId === bId) { setStatus("无法与自己结婚"); return false; }
+  const a = getPerson(aId), b = getPerson(bId);
+  if (!a || !b) return false;
+  if (hasPartner(aId, bId)) { setStatus("两人已是配偶"); return false; }
+  // 不允许直系亲属（父母/子女）成为配偶
+  const aAnc = ancestorsWithDepth(aId), bAnc = ancestorsWithDepth(bId);
+  if (aAnc.has(bId) || bAnc.has(aId)) { setStatus("直系亲属（父母/子女）不能连为配偶"); return false; }
+  pushHistory();
+  addRelationship({ type: "partner", person1: aId, person2: bId });
+  state.linkMode = null;
+  state.selectedId = aId;
+  autoLayout(); refresh(); fitView();
+  const consang = areConsanguineous(aId, bId);
+  setStatus(consang ? "已连接配偶（检测到近亲，已画双线）" : "已连接配偶");
+  return true;
+}
+
 function addChild(sex) {
   const parent = requireSelection();
   if (!parent) return;
@@ -333,9 +376,15 @@ function deleteSelected() {
   const p = requireSelection();
   if (!p) return;
   pushHistory();
+  const delGroup = p.twinGroup;
   state.project.people = state.project.people.filter((x) => x.id !== p.id);
   state.project.relationships = state.project.relationships.filter((r) =>
     r.parent !== p.id && r.child !== p.id && r.person1 !== p.id && r.person2 !== p.id);
+  // 清理孤立 twinGroup：同组若只剩 1 人，则该人不再是双胞胎
+  if (delGroup) {
+    const rest = state.project.people.filter((x) => x.twinGroup === delGroup);
+    if (rest.length <= 1) rest.forEach((x) => { delete x.twinGroup; delete x.twinType; });
+  }
   state.selectedId = null;
   autoLayout(); refresh(); fitView();
   setStatus("已删除成员");
@@ -532,7 +581,12 @@ function autoLayout() {
     return 0;
   };
   const keyDown = (n) => (baryParents(n) == null ? n.cx : baryParents(n)) + sideBias(n);
-  const keyUp = (n) => (baryChildren(n) == null ? n.cx : baryChildren(n)) + sideBias(n);
+  // 上行排序：有子女用子女重心；叶节点改用父代重心（而非 cx），
+  // 防止兄弟叶节点以自身位置作 key 时排到「兄弟+配偶」夫妻节点右侧
+  const keyUp = (n) => {
+    const bc = baryChildren(n), bp = baryParents(n);
+    return (bc != null ? bc : bp != null ? bp : n.cx) + sideBias(n);
+  };
 
   /* 4. 重心迭代：下行按父代重心、上行按子代重心，反复排序+打包 */
   for (let iter = 0; iter < 6; iter++) {
@@ -560,6 +614,19 @@ function autoLayout() {
         n.cx = clamp(target, lo, hi);
       }
     }
+  }
+
+  /* 5c. 从上往下显式居中：将每个父节点的子节点整体平移至以父节点为中心。
+         补偿步骤5单向扫描产生的偏置——子女重心偏离父母连线中点（L形下降线）。*/
+  for (let g = 0; g < maxGen; g++) {
+    genNodes[g].forEach((parentNode) => {
+      const chArr = [...childrenOf.get(parentNode)];
+      if (chArr.length === 0) return;
+      const childCentroid = avg(chArr.map((c) => c.cx));
+      const diff = parentNode.cx - childCentroid;
+      if (Math.abs(diff) < 0.1) return;
+      chArr.forEach((c) => { c.cx += diff; });
+    });
   }
 
   /* 6. 写回成员坐标 */
@@ -798,6 +865,7 @@ function drawRelationships(root) {
 
 // 是否近亲婚配：两人有共同祖先（向上 4 代内）
 function areConsanguineous(aId, bId) {
+  if (!aId || !bId || aId === bId) return false;
   const anc = (id, depth, acc) => {
     if (depth > 4) return;
     findParents(id).forEach((p) => { acc.add(p.id); anc(p.id, depth + 1, acc); });
@@ -990,8 +1058,9 @@ function renderForm() {
 function updateButtons() {
   const has = Boolean(selectedPerson());
   [els.addFatherBtn, els.addMotherBtn, els.addPartnerBtn, els.addBrotherBtn, els.addSisterBtn,
-   els.addSonBtn, els.addDaughterBtn, els.addTwinBrotherBtn, els.addTwinSisterBtn]
+   els.addSonBtn, els.addDaughterBtn, els.addTwinBrotherBtn, els.addTwinSisterBtn, els.linkPartnerBtn]
     .forEach((b) => (b.disabled = !has));
+  if (els.linkPartnerBtn) els.linkPartnerBtn.classList.toggle("accent", Boolean(state.linkMode));
   els.undoBtn.disabled = state.history.length === 0;
   els.redoBtn.disabled = state.future.length === 0;
   els.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
@@ -1010,6 +1079,15 @@ function svgPoint(evt) {
 
 function onCanvasPointerDown(evt) {
   const target = evt.target.closest(".node-hit");
+  // 连接配偶模式：点击目标节点即建立关系
+  if (state.linkMode) {
+    if (target) {
+      connectPartners(state.linkMode.sourceId, target.getAttribute("data-id"));
+    } else {
+      state.linkMode = null; setStatus("已取消连接配偶"); refresh(false);
+    }
+    return;
+  }
   if (target) {
     const id = target.getAttribute("data-id");
     state.selectedId = id;
@@ -1451,7 +1529,8 @@ function buildFamilyHistory() {
       (o.p.affectedStatus === "affected" || o.p.affectedStatus === "suspected"));
   const total = state.project.people.length;
   const lines = [];
-  const pName = proband.name && proband.name !== "先证者" ? `（${proband.name}）` : "";
+  const pRealName = realName(proband);
+  const pName = pRealName ? `（${pRealName}）` : "";
   const pDx = proband.diagnoses && proband.diagnoses.length ? proband.diagnoses.join("、") : (proband.affectedStatus === "affected" ? "（诊断未填写）" : "");
   lines.push(`先证者${pName}${pDx ? "，临床诊断" + pDx : ""}。家系共纳入 ${total} 名成员。`);
   if (affected.length === 0) {
@@ -1466,7 +1545,8 @@ function buildFamilyHistory() {
         const dx = p.diagnoses && p.diagnoses.length ? p.diagnoses.join("、") : "精神障碍";
         const sus = p.affectedStatus === "suspected" ? "（疑似）" : "";
         const dec = p.deceased ? "，已故" : "";
-        const nm = p.name && p.name !== term ? `${p.name}（${term}）` : term;
+        const rn = realName(p);
+        const nm = rn && rn !== term ? `${rn}（${term}）` : term;
         return `${nm}患${dx}${sus}${dec}`;
       });
       lines.push(`${degName[d] || d + "级亲属"}中，${parts.join("；")}。`);
