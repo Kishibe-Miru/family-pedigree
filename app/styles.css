@@ -190,7 +190,9 @@ kbd {
 .person-symbol.affected { fill: var(--node-ink); }
 .person-symbol.suspected { fill: url(#suspectedPattern); }
 .person-symbol.unknown { fill: #e2e8ec; }
+.person-symbol.carrier { fill: #fff; }
 .carrier-dot { fill: var(--node-ink); }
+.twin-bar { stroke: var(--node-ink); stroke-width: 2.2; }
 .person-label { font: 13px "Microsoft YaHei", sans-serif; fill: #172026; text-anchor: middle; dominant-baseline: hanging; }
 .id-label { font: 600 12px "Microsoft YaHei", sans-serif; fill: #3a444c; text-anchor: end; dominant-baseline: hanging; }
 .diagnosis-label { font: 11px "Microsoft YaHei", sans-serif; fill: #5a6b8c; text-anchor: middle; dominant-baseline: hanging; }
@@ -235,3 +237,8 @@ kbd {
 /* scrollbars */
 .panel::-webkit-scrollbar { width: 8px; }
 .panel::-webkit-scrollbar-thumb { background: #cfd6dd; border-radius: 8px; }
+
+/* 家族史对话框 (4.0) */
+.history-dialog { border: 0; border-radius: 12px; padding: 18px; width: min(560px, 92vw); box-shadow: 0 12px 40px rgba(0,0,0,.22); }
+.history-dialog::backdrop { background: rgba(20,28,36,.42); }
+.history-dialog textarea { width: 100%; box-sizing: border-box; margin: 10px 0; font: 13px/1.7 "Microsoft YaHei", sans-serif; color: #1b2329; border: 1px solid #d8dde2; border-radius: 8px; padding: 10px; resize: vertical; }

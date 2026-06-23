@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>精神科遗传家族谱系图绘制工具 3.0</title>
+  <title>精神科遗传家族谱系图绘制工具 4.0</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -11,7 +11,7 @@
     <div class="brand">
       <span class="brand-mark">⌘</span>
       <div>
-        <h1>家族谱系图绘制工具 <span class="ver">3.0</span></h1>
+        <h1>家族谱系图绘制工具 <span class="ver">4.0</span></h1>
         <p id="projectMeta" class="brand-sub">未命名家系图 · 0 名成员</p>
       </div>
     </div>
@@ -49,12 +49,16 @@
           <button id="addSisterBtn" class="action-btn" disabled>姐妹 <kbd>S</kbd></button>
           <button id="addSonBtn" class="action-btn" disabled>儿子 <kbd>C</kbd></button>
           <button id="addDaughterBtn" class="action-btn" disabled>女儿 <kbd>D</kbd></button>
+          <button id="addTwinBrotherBtn" class="action-btn" disabled>孪生兄弟</button>
+          <button id="addTwinSisterBtn" class="action-btn" disabled>孪生姐妹</button>
         </div>
       </section>
 
       <section class="panel-block">
         <h2 class="panel-title">排版与视图</h2>
         <button id="autoLayoutBtn" class="action-btn">↳ 自动排版</button>
+        <label class="check-row" title="关闭后，拖动节点将保持手动位置，连线自动跟随"><input type="checkbox" id="optSnapDrag" checked /> 拖动后自动对齐</label>
+        <button id="familyHistoryBtn" class="action-btn">📋 生成家族史文字</button>
         <div class="view-row">
           <button id="zoomOutBtn" class="mini-btn" title="缩小">－</button>
           <span id="zoomLabel" class="zoom-label">100%</span>
@@ -112,6 +116,7 @@
               <option value="unaffected">未患病</option>
               <option value="affected">患病</option>
               <option value="suspected">疑似</option>
+              <option value="carrier">携带者 (·)</option>
               <option value="unknown">未知</option>
             </select>
           </label>
@@ -129,6 +134,7 @@
         <div class="check-grid">
           <label class="check-row"><input type="checkbox" id="personDeceased" /> 已故 (／)</label>
           <label class="check-row"><input type="checkbox" id="personProband" /> 先证者 (箭头)</label>
+          <label class="check-row" id="identicalRow" hidden><input type="checkbox" id="personIdentical" /> 同卵双胞胎</label>
         </div>
 
         <label class="field"><span>精神科诊断</span>
@@ -159,6 +165,15 @@
       </form>
     </aside>
   </main>
+
+  <dialog id="historyDialog" class="history-dialog">
+    <h2 class="panel-title">家族史文字（可直接粘贴进病历）</h2>
+    <textarea id="historyText" rows="14" readonly></textarea>
+    <div class="form-actions">
+      <button type="button" id="copyHistoryBtn" class="action-btn small">复制到剪贴板</button>
+      <button type="button" id="closeHistoryBtn" class="action-btn small">关闭</button>
+    </div>
+  </dialog>
 
   <script src="app.js"></script>
 </body>
