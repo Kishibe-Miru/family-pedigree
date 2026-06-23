@@ -1,0 +1,16 @@
+# Local agent/editor state
+.agents/
+.codex/
+.claude/
+
+# Local archive/source folders kept outside the published Git tree
+/2026家族谱系图*/
+/历史版本/
+/参考项目/
+/output/
+/release-assets/
+/worktrees/
+
+# Runtime and dependency output
+*.log
+node_modules/

@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>本地疾病家族谱系图</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <h1>疾病家族谱系图</h1>
+          <p>完全本地绘制，数据不离开浏览器。</p>
+        </div>
+
+        <section class="panel">
+          <h2>拖入人员</h2>
+          <div class="palette">
+            <button class="palette-item" draggable="true" data-sex="male">
+              <span class="symbol square"></span>
+              男性
+            </button>
+            <button class="palette-item" draggable="true" data-sex="female">
+              <span class="symbol circle"></span>
+              女性
+            </button>
+            <button class="palette-item" draggable="true" data-sex="unknown">
+              <span class="symbol diamond"></span>
+              未知
+            </button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>连线</h2>
+          <div class="segmented" role="group" aria-label="关系类型">
+            <button class="relation-mode active" data-relation="partner">配偶</button>
+            <button class="relation-mode" data-relation="parentChild">亲子</button>
+            <button class="relation-mode" data-relation="sibling">同胞</button>
+          </div>
+          <button id="connectModeButton" class="primary">连接两人</button>
+          <p class="hint">开启后依次点击两个人，生成当前关系线。</p>
+        </section>
+
+        <section class="panel">
+          <h2>操作</h2>
+          <div class="actions">
+            <button id="addTemplateButton">三代示例</button>
+            <button id="layoutButton">一键整理</button>
+            <button id="exportButton">导出 PNG</button>
+            <button id="clearButton" class="danger">清空</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>布局设置</h2>
+          <div class="layout-controls">
+            <label>
+              <span>图标大小 <b id="nodeSizeValue">56</b></span>
+              <input id="nodeSizeRange" type="range" min="40" max="90" step="2" />
+            </label>
+            <label>
+              <span>上下代际间距 <b id="generationSpacingValue">200</b></span>
+              <input id="generationSpacingRange" type="range" min="140" max="300" step="10" />
+            </label>
+            <label>
+              <span>兄弟姐妹间距 <b id="siblingSpacingValue">180</b></span>
+              <input id="siblingSpacingRange" type="range" min="120" max="280" step="10" />
+            </label>
+            <label>
+              <span>整理横向间距 <b id="layoutSpacingValue">190</b></span>
+              <input id="layoutSpacingRange" type="range" min="140" max="300" step="10" />
+            </label>
+            <button id="resetLayoutButton" type="button">恢复默认</button>
+          </div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="toolbar">
+          <div>
+            <strong>画布</strong>
+            <span id="statusText">拖拽左侧人员到画布开始</span>
+          </div>
+          <div class="legend">
+            <span><i class="legend-fill affected"></i>精神/躯体疾病</span>
+            <span><i class="legend-fill suicide"></i>自杀死亡/未遂</span>
+            <span><i class="legend-fill substance"></i>物质使用</span>
+            <span><i class="legend-arrow"></i>先证者</span>
+          </div>
+        </header>
+
+        <div id="canvasWrap" class="canvas-wrap">
+          <svg id="pedigreeSvg" class="pedigree-svg" width="2400" height="1300" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <marker id="arrow" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L8,3 z" fill="#1d4ed8"></path>
+              </marker>
+            </defs>
+            <g id="relationshipLayer"></g>
+            <g id="nodeLayer"></g>
+          </svg>
+        </div>
+      </main>
+
+      <aside class="inspector">
+        <h2>人员信息</h2>
+        <form id="personForm" class="person-form">
+          <label>
+            显示名称
+            <input id="personLabel" type="text" maxlength="24" />
+          </label>
+          <label>
+            性别
+            <select id="personSex">
+              <option value="male">男性</option>
+              <option value="female">女性</option>
+              <option value="unknown">未知/其他</option>
+            </select>
+          </label>
+          <label>
+            年龄或出生年
+            <input id="personAge" type="text" maxlength="24" />
+          </label>
+          <label>
+            疾病/表型
+            <input id="personDisease" type="text" maxlength="40" />
+          </label>
+          <label>
+            发病年龄
+            <input id="personOnset" type="text" maxlength="24" />
+          </label>
+          <div class="clinical-flags">
+            <label class="check-row">
+              <input id="personMental" type="checkbox" />
+              精神障碍
+            </label>
+            <label class="check-row">
+              <input id="personSuicide" type="checkbox" />
+              自杀史
+            </label>
+            <label class="check-row">
+              <input id="personSubstance" type="checkbox" />
+              物质使用
+            </label>
+          </div>
+          <label>
+            状态
+            <select id="personStatus">
+              <option value="unaffected">未患病</option>
+              <option value="affected">患病</option>
+              <option value="carrier">携带者</option>
+              <option value="unknown">未知</option>
+            </select>
+          </label>
+          <label>
+            所属世代
+            <select id="personGeneration">
+              <option value="0">I 祖辈</option>
+              <option value="1">II 父母辈</option>
+              <option value="2">III 先证者/同胞</option>
+              <option value="3">IV 子代</option>
+              <option value="4">V 后代</option>
+            </select>
+          </label>
+          <div class="generation-tools">
+            <button id="generationUpButton" type="button">上移一代</button>
+            <button id="generationDownButton" type="button">下移一代</button>
+          </div>
+          <label class="check-row">
+            <input id="personDeceased" type="checkbox" />
+            已故
+          </label>
+          <label class="check-row">
+            <input id="personProband" type="checkbox" />
+            先证者
+          </label>
+          <label>
+            备注
+            <textarea id="personNotes" rows="4"></textarea>
+          </label>
+          <button id="deleteSelectedButton" type="button" class="danger">删除选中</button>
+        </form>
+      </aside>
+    </div>
+
+    <div id="nodeContextMenu" class="context-menu" hidden>
+      <div class="context-submenu">
+        <button type="button" class="context-parent">添加亲属 <span>›</span></button>
+        <div class="context-submenu-panel">
+          <button data-action="father">添加父亲</button>
+          <button data-action="mother">添加母亲</button>
+          <button data-action="husband">添加丈夫</button>
+          <button data-action="wife">添加妻子</button>
+          <button data-action="brother">添加兄弟</button>
+          <button data-action="sister">添加姐妹</button>
+          <button data-action="son">添加儿子</button>
+          <button data-action="daughter">添加女儿</button>
+        </div>
+      </div>
+      <button data-action="markProband">标记为先证者</button>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
