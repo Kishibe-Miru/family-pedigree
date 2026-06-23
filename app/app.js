@@ -1,18 +1,18 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 4.4
+   精神科遗传家族谱系图绘制工具 4.5
    纯前端、本地优先。本版新增：双胞胎（同卵/异卵）、携带者圆点、
    近亲婚配自动双线、拖动自由摆放开关、一键生成家族史文字。
    4.1：连线 T 形修复；新增"与已选成员结婚"连接已有节点为配偶；
         家族史不再把占位默认名当真名；删除孪生后清理孤立 twinGroup。
    4.2：固定同胞出生顺序；同胞小家庭整体平移；多配偶/半同胞婚配线避让。
-   4.4：显式 marriage node；子女下降线挂到婚配节点，大家庭同胞线分段并增加分组间距。
+   4.5：父母下降线对齐血缘子女本人锚点，而非子女夫妻超级节点中心。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "4.4";
+const VERSION = "4.5";
 
 // 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
 const PLACEHOLDER_NAMES = new Set([
@@ -682,20 +682,14 @@ function autoLayout() {
     }
   }
 
-  /* 5c. 从上往下显式居中：将每个父节点的子节点整体平移至以父节点为中心。
-         补偿步骤5单向扫描产生的偏置——子女重心偏离父母连线中点（L形下降线）。*/
-  for (let g = 0; g < maxGen; g++) {
-    genNodes[g].forEach((parentNode) => {
-      const chArr = [...childrenOf.get(parentNode)];
-      if (chArr.length === 0) return;
-      const childCentroid = avg(chArr.map((c) => c.cx));
-      const diff = parentNode.cx - childCentroid;
-      if (Math.abs(diff) < 0.1) return;
-      chArr.forEach((c) => { c.cx += diff; });
-    });
-  }
+  /* 5c. 从上往下显式居中：用血缘子女本人的锚点对齐父母婚配中心。
+         如果子女已经成家，不能用「子女+配偶」夫妻超级节点的中心，否则父母下降线会折到
+         夫妻中心再横接血缘子女；临床家系图规范应接到血缘子女本人。*/
+  alignFamilyChildAnchors(familyUnits, nodeOf, childrenOf, maxGen);
 
   enforceSiblingBirthOrder(nodes, nodeOf, childrenOf);
+  // 同胞顺序重排会移动夫妻节点，需再次按血缘子女锚点收敛。
+  alignFamilyChildAnchors(familyUnits, nodeOf, childrenOf, maxGen);
 
   /* 6. 写回成员坐标 */
   nodes.forEach((n) => {
@@ -723,6 +717,30 @@ function anchorXForMemberNode(node, memberId) {
   if (memberId === l) return node.cx - PERSON_GAP / 2;
   if (memberId === r) return node.cx + PERSON_GAP / 2;
   return node.cx;
+}
+
+function alignFamilyChildAnchors(familyUnits, nodeOf, childrenOf, maxGen) {
+  for (let g = 0; g < maxGen; g++) {
+    familyUnits.forEach((u) => {
+      const parentNodes = [...new Set(u.parentIds.map((id) => nodeOf.get(id)).filter(Boolean))];
+      const childItems = u.childIds
+        .map((id) => ({ id, node: nodeOf.get(id) }))
+        .filter((item) => item.node && item.node.gen === g + 1);
+      if (parentNodes.length === 0 || childItems.length === 0) return;
+
+      const parentCenter = avg(parentNodes.map((n) => n.cx));
+      const childCenter = avg(childItems.map((item) => anchorXForMemberNode(item.node, item.id)));
+      const diff = parentCenter - childCenter;
+      if (Math.abs(diff) < 0.1) return;
+
+      const moved = new Set();
+      childItems.forEach((item) => {
+        if (moved.has(item.node)) return;
+        moved.add(item.node);
+        moveNodeWithDescendants(item.node, diff, childrenOf);
+      });
+    });
+  }
 }
 
 function setMemberAnchorX(node, memberId, targetX) {
