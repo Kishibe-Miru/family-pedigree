@@ -1,16 +1,17 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 4.1
+   精神科遗传家族谱系图绘制工具 4.2
    纯前端、本地优先。本版新增：双胞胎（同卵/异卵）、携带者圆点、
    近亲婚配自动双线、拖动自由摆放开关、一键生成家族史文字。
    4.1：连线 T 形修复；新增"与已选成员结婚"连接已有节点为配偶；
         家族史不再把占位默认名当真名；删除孪生后清理孤立 twinGroup。
+   4.2：固定同胞出生顺序；同胞小家庭整体平移；多配偶/半同胞婚配线避让。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "4.1";
+const VERSION = "4.2";
 
 // 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
 const PLACEHOLDER_NAMES = new Set([
@@ -629,6 +630,8 @@ function autoLayout() {
     });
   }
 
+  enforceSiblingBirthOrder(nodes, nodeOf, childrenOf);
+
   /* 6. 写回成员坐标 */
   nodes.forEach((n) => {
     const y = n.gen * GENERATION_GAP;
@@ -647,6 +650,85 @@ function autoLayout() {
   manualPos.forEach((pos, id) => { const p = getPerson(id); if (p) { p.x = pos.x; p.y = pos.y; } });
   normalizeToOrigin();
   computeNumbering(gen);
+}
+
+function anchorXForMemberNode(node, memberId) {
+  if (!node || node.members.length === 1) return node ? node.cx : 0;
+  const [l, r] = node.members;
+  if (memberId === l) return node.cx - PERSON_GAP / 2;
+  if (memberId === r) return node.cx + PERSON_GAP / 2;
+  return node.cx;
+}
+
+function setMemberAnchorX(node, memberId, targetX) {
+  if (!node) return;
+  if (node.members.length === 1) { node.cx = targetX; return; }
+  const [l, r] = node.members;
+  if (memberId === l) node.cx = targetX + PERSON_GAP / 2;
+  else if (memberId === r) node.cx = targetX - PERSON_GAP / 2;
+  else node.cx = targetX;
+}
+
+function shiftDescendantNodes(node, dx, childrenOf, seen = new Set()) {
+  const kids = [...(childrenOf.get(node) || [])];
+  kids.forEach((childNode) => {
+    if (seen.has(childNode)) return;
+    seen.add(childNode);
+    childNode.cx += dx;
+    shiftDescendantNodes(childNode, dx, childrenOf, seen);
+  });
+}
+
+function moveNodeWithDescendants(node, dx, childrenOf) {
+  if (!node || Math.abs(dx) < 0.1) return;
+  node.cx += dx;
+  shiftDescendantNodes(node, dx, childrenOf);
+}
+
+function enforceSiblingBirthOrder(nodes, nodeOf, childrenOf) {
+  const units = collectFamilyUnits();
+  const applied = new Set();
+
+  units.forEach((u) => {
+    const items = u.children
+      .map((child) => ({ child, node: nodeOf.get(child.id) }))
+      .filter((item) => item.node);
+    if (items.length < 2) return;
+
+    const uniqueNodes = new Set(items.map((item) => item.node));
+    if (uniqueNodes.size !== items.length) return;
+
+    const currentSlots = items
+      .map((item) => anchorXForMemberNode(item.node, item.child.id))
+      .sort((a, b) => a - b);
+    const ordered = [...items].sort((a, b) => a.child.order - b.child.order);
+
+    ordered.forEach((item, idx) => {
+      const key = `${u.parentIds.join("|")}→${item.child.id}`;
+      if (applied.has(key)) return;
+      applied.add(key);
+      const before = item.node.cx;
+      setMemberAnchorX(item.node, item.child.id, currentSlots[idx]);
+      const dx = item.node.cx - before;
+      shiftDescendantNodes(item.node, dx, childrenOf);
+    });
+  });
+
+  // Repack each generation after slot permutation, moving whole couple nodes together.
+  const rows = new Map();
+  nodes.forEach((n) => {
+    if (!rows.has(n.gen)) rows.set(n.gen, []);
+    rows.get(n.gen).push(n);
+  });
+  rows.forEach((row) => {
+    row.sort((a, b) => a.cx - b.cx);
+    for (let i = 1; i < row.length; i++) {
+      const prev = row[i - 1], cur = row[i];
+      const minGap = prev.width / 2 + PERSON_GAP * 0.35 + cur.width / 2;
+      const minCx = prev.cx + minGap;
+      if (cur.cx < minCx) moveNodeWithDescendants(cur, minCx - cur.cx, childrenOf);
+    }
+  });
 }
 
 function resolveOverlaps(gen) {
@@ -773,18 +855,22 @@ function drawGenerationLabels(root) {
 
 function drawRelationships(root) {
   const units = collectFamilyUnits();
+  const partnerRoutes = computePartnerRoutes();
 
   // 配偶线：同排水平连接；近亲婚配画双线；若两人不同高（被拖动过）画台阶折线
   state.project.relationships.filter((r) => r.type === "partner").forEach((r) => {
     const a = getPerson(r.person1), b = getPerson(r.person2);
     if (!a || !b) return;
-    const [l, rt] = a.x <= b.x ? [a, b] : [b, a];
-    const consang = areConsanguineous(l.id, rt.id);
-    if (Math.abs(l.y - rt.y) < 1) {
-      const y = l.y;
-      root.appendChild(svgEl("line", { x1: l.x + R, y1: y, x2: rt.x - R, y2: y, class: "marriage-line" }));
-      if (consang) root.appendChild(svgEl("line", { x1: l.x + R, y1: y + 3, x2: rt.x - R, y2: y + 3, class: "marriage-line" }));
+    const route = partnerRoutes.get(coupleKey([a.id, b.id]));
+    const consang = areConsanguineous(a.id, b.id);
+    if (route && route.kind === "line") {
+      root.appendChild(svgEl("line", { x1: route.x1, y1: route.y, x2: route.x2, y2: route.y, class: "marriage-line" }));
+      if (consang) root.appendChild(svgEl("line", { x1: route.x1, y1: route.y + 3, x2: route.x2, y2: route.y + 3, class: "marriage-line" }));
+    } else if (route && route.kind === "path") {
+      root.appendChild(svgEl("path", { d: route.d, class: "marriage-line" }));
+      if (consang) root.appendChild(svgEl("path", { d: route.d2, class: "marriage-line" }));
     } else {
+      const [l, rt] = a.x <= b.x ? [a, b] : [b, a];
       const mx = (l.x + rt.x) / 2;
       root.appendChild(svgEl("path", { d: `M ${l.x + R} ${l.y} H ${mx} V ${rt.y} H ${rt.x - R}`, class: "marriage-line" }));
       if (consang) root.appendChild(svgEl("path", { d: `M ${l.x + R} ${l.y + 3} H ${mx + 3} V ${rt.y} H ${rt.x - R}`, class: "marriage-line" }));
@@ -799,8 +885,9 @@ function drawRelationships(root) {
     const pa = getPerson(u.parentIds[0]);
     const pb = u.parentIds.length === 2 ? getPerson(u.parentIds[1]) : null;
     if (!pa || (u.parentIds.length === 2 && !pb)) return null;
+    const route = pb ? partnerRoutes.get(coupleKey([pa.id, pb.id])) : null;
     const dropX = pb ? (pa.x + pb.x) / 2 : pa.x;
-    const dropTopY = pb ? (pa.y + pb.y) / 2 : pa.y + R;
+    const dropTopY = pb ? (route ? route.childY : (pa.y + pb.y) / 2) : pa.y + R;
     const childTopY = Math.min(...u.children.map((c) => c.y)) - R;
     const xs = u.children.map((c) => c.x);
     const lo = Math.min(...xs, dropX), hi = Math.max(...xs, dropX);
@@ -861,6 +948,60 @@ function drawRelationships(root) {
       }
     });
   });
+}
+
+function computePartnerRoutes() {
+  const routes = new Map();
+  const rels = state.project.relationships.filter((r) => r.type === "partner");
+  const sameRow = [];
+
+  rels.forEach((r) => {
+    const a = getPerson(r.person1), b = getPerson(r.person2);
+    if (!a || !b) return;
+    const [l, rt] = a.x <= b.x ? [a, b] : [b, a];
+    const key = coupleKey([a.id, b.id]);
+    if (Math.abs(l.y - rt.y) < 1) {
+      const y = l.y;
+      const x1 = l.x + R, x2 = rt.x - R;
+      const blocked = state.project.people.some((p) =>
+        p.id !== l.id && p.id !== rt.id &&
+        Math.abs(p.y - y) < 1 &&
+        p.x - R < x2 && p.x + R > x1);
+      sameRow.push({ key, l, rt, y, x1, x2, blocked });
+    } else {
+      const mx = (l.x + rt.x) / 2;
+      routes.set(key, {
+        kind: "path",
+        childY: (l.y + rt.y) / 2,
+        d: `M ${l.x + R} ${l.y} H ${mx} V ${rt.y} H ${rt.x - R}`,
+        d2: `M ${l.x + R} ${l.y + 3} H ${mx + 3} V ${rt.y} H ${rt.x - R}`,
+      });
+    }
+  });
+
+  const laneUse = new Map();
+  sameRow
+    .sort((a, b) => a.y - b.y || a.x1 - b.x1 || a.x2 - b.x2)
+    .forEach((r) => {
+      if (!r.blocked) {
+        routes.set(r.key, { kind: "line", childY: r.y, x1: r.x1, x2: r.x2, y: r.y });
+        return;
+      }
+
+      const rowKey = Math.round(r.y);
+      const used = laneUse.get(rowKey) || [];
+      let lane = 0;
+      while (used.some((u) => u.lane === lane && r.x1 < u.x2 + 12 && u.x1 < r.x2 + 12)) lane++;
+      used.push({ lane, x1: r.x1, x2: r.x2 });
+      laneUse.set(rowKey, used);
+
+      const laneY = r.y - R - 18 - lane * 12;
+      const d = `M ${r.x1} ${r.y} V ${laneY} H ${r.x2} V ${r.y}`;
+      const d2 = `M ${r.x1 + 3} ${r.y} V ${laneY + 4} H ${r.x2 - 3} V ${r.y}`;
+      routes.set(r.key, { kind: "path", childY: laneY, d, d2 });
+    });
+
+  return routes;
 }
 
 // 是否近亲婚配：两人有共同祖先（向上 4 代内）
