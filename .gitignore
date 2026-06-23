@@ -10,6 +10,7 @@
 /output/
 /release-assets/
 /worktrees/
+/.远程git化前本地文件/
 
 # Runtime and dependency output
 *.log
