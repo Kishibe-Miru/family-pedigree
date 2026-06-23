@@ -1,17 +1,18 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 4.2
+   精神科遗传家族谱系图绘制工具 4.3
    纯前端、本地优先。本版新增：双胞胎（同卵/异卵）、携带者圆点、
    近亲婚配自动双线、拖动自由摆放开关、一键生成家族史文字。
    4.1：连线 T 形修复；新增"与已选成员结婚"连接已有节点为配偶；
         家族史不再把占位默认名当真名；删除孪生后清理孤立 twinGroup。
    4.2：固定同胞出生顺序；同胞小家庭整体平移；多配偶/半同胞婚配线避让。
+   4.3：显式 familyUnit 运行时模型；父母组合、子女分组、多配偶/半同胞统一从家庭单元绘制。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "4.2";
+const VERSION = "4.3";
 
 // 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
 const PLACEHOLDER_NAMES = new Set([
@@ -47,7 +48,8 @@ const state = {
   history: [],
   future: [],
   genMap: new Map(),
-  numberMap: new Map()
+  numberMap: new Map(),
+  familyUnits: []
 };
 
 const els = {};
@@ -148,6 +150,7 @@ function createProject() {
     updatedAt: now,
     people: [],
     relationships: [],
+    familyUnits: [],
     settings: {
       showNumber: true, showName: true, showDiagnosis: true,
       showAge: false, showLegend: true, showTitle: true, snapDrag: true
@@ -477,27 +480,75 @@ function orderCouple(aId, bId) {
 
 function coupleKey(ids) { return [...ids].sort().join("|"); }
 
-function collectFamilyUnits() {
+function familyUnitId(parentIds) {
+  const key = parentIds.length ? coupleKey(parentIds) : "founders";
+  return `fu:${key}`;
+}
+
+function normalizeFamilyParents(parents) {
+  if (parents.length >= 2) {
+    const male = parents.find((p) => p.sex === "male");
+    const female = parents.find((p) => p.sex === "female");
+    const ids = (male && female) ? [male.id, female.id] : [parents[0].id, parents[1].id];
+    return orderCouple(ids[0], ids[1]);
+  }
+  return parents.length === 1 ? [parents[0].id] : [];
+}
+
+function buildFamilyUnitsFromRelationships() {
   const groups = new Map();
   state.project.people.forEach((child) => {
-    const parents = findParents(child.id);
+    const parents = normalizeFamilyParents(findParents(child.id));
     if (parents.length === 0) return;
-    let parentIds;
-    if (parents.length >= 2) {
-      const male = parents.find((p) => p.sex === "male");
-      const female = parents.find((p) => p.sex === "female");
-      parentIds = (male && female) ? [male.id, female.id] : [parents[0].id, parents[1].id];
-    } else {
-      parentIds = [parents[0].id];
+    const key = coupleKey(parents);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        id: familyUnitId(parents),
+        parentKey: key,
+        parentIds: parents,
+        childIds: []
+      });
     }
-    const key = coupleKey(parentIds);
-    if (!groups.has(key)) groups.set(key, { parentIds, children: [] });
-    groups.get(key).children.push(child);
+    groups.get(key).childIds.push(child.id);
   });
-  return [...groups.values()].map((u) => ({
-    parentIds: u.parentIds.length === 2 ? orderCouple(u.parentIds[0], u.parentIds[1]) : u.parentIds,
-    children: u.children.sort((a, b) => a.order - b.order)
+
+  return [...groups.values()]
+    .map((u) => {
+      const childIds = [...new Set(u.childIds)]
+        .map((id) => getPerson(id))
+        .filter(Boolean)
+        .sort((a, b) => a.order - b.order)
+        .map((p) => p.id);
+      return {
+        id: u.id,
+        parentKey: u.parentKey,
+        parentIds: u.parentIds,
+        childIds,
+        children: childIds.map((id) => getPerson(id)).filter(Boolean),
+        parents: u.parentIds.map((id) => getPerson(id)).filter(Boolean)
+      };
+    })
+    .sort((a, b) => {
+      const ao = Math.min(...a.parentIds.map((id) => getPerson(id)?.order ?? 999999));
+      const bo = Math.min(...b.parentIds.map((id) => getPerson(id)?.order ?? 999999));
+      return ao - bo || a.id.localeCompare(b.id);
+    });
+}
+
+function syncFamilyUnits() {
+  const units = buildFamilyUnitsFromRelationships();
+  state.familyUnits = units;
+  state.project.familyUnits = units.map((u) => ({
+    id: u.id,
+    parentKey: u.parentKey,
+    parentIds: [...u.parentIds],
+    childIds: [...u.childIds]
   }));
+  return units;
+}
+
+function collectFamilyUnits() {
+  return syncFamilyUnits();
 }
 
 /* ============================================================
@@ -516,6 +567,7 @@ function autoLayout() {
   if (people.length === 0) return;
   const gen = computeGenerations();
   state.genMap = gen;
+  const familyUnits = syncFamilyUnits();
   // 记录手动摆放节点的位置，排版结束后还原（自由摆放不被自动布局覆盖）
   const manualPos = new Map();
   people.forEach((p) => { if (p.manual) manualPos.set(p.id, { x: p.x, y: p.y }); });
@@ -545,9 +597,14 @@ function autoLayout() {
   /* 2. 节点级父子边（去重，允许一个节点有多个父节点） */
   const parentsOf = new Map(); nodes.forEach((n) => parentsOf.set(n, new Set()));
   const childrenOf = new Map(); nodes.forEach((n) => childrenOf.set(n, new Set()));
-  state.project.relationships.filter((r) => r.type === "parentChild").forEach((r) => {
-    const pn = nodeOf.get(r.parent), cn = nodeOf.get(r.child);
-    if (pn && cn && pn !== cn) { parentsOf.get(cn).add(pn); childrenOf.get(pn).add(cn); }
+  familyUnits.forEach((u) => {
+    const parentNodes = [...new Set(u.parentIds.map((id) => nodeOf.get(id)).filter(Boolean))];
+    const childNodes = [...new Set(u.childIds.map((id) => nodeOf.get(id)).filter(Boolean))];
+    parentNodes.forEach((pn) => {
+      childNodes.forEach((cn) => {
+        if (pn && cn && pn !== cn) { parentsOf.get(cn).add(pn); childrenOf.get(pn).add(cn); }
+      });
+    });
   });
 
   /* 3. 分代 */
@@ -1374,7 +1431,7 @@ function onKeyDown(evt) {
 /* ============================================================
    撤销 / 重做
    ============================================================ */
-function snapshot() { return JSON.stringify(state.project); }
+function snapshot() { syncFamilyUnits(); return JSON.stringify(state.project); }
 function pushHistory() {
   state.history.push(snapshot());
   if (state.history.length > 60) state.history.shift();
@@ -1383,7 +1440,7 @@ function pushHistory() {
 function undo() {
   if (state.history.length === 0) return;
   state.future.push(snapshot());
-  state.project = JSON.parse(state.history.pop());
+  state.project = normalizeProject(JSON.parse(state.history.pop()));
   state.selectedId = null;
   applySettingsToUI();
   computeGenerations();
@@ -1393,7 +1450,7 @@ function undo() {
 function redo() {
   if (state.future.length === 0) return;
   state.history.push(snapshot());
-  state.project = JSON.parse(state.future.pop());
+  state.project = normalizeProject(JSON.parse(state.future.pop()));
   state.selectedId = null;
   applySettingsToUI();
   autoLayout(); refresh(); fitView();
@@ -1432,6 +1489,7 @@ function newProject() {
 
 function saveJson() {
   state.project.updatedAt = new Date().toISOString();
+  syncFamilyUnits();
   const blob = new Blob([JSON.stringify(state.project, null, 2)], { type: "application/json" });
   download(blob, `${safeName(state.project.title)}_${stamp()}.json`);
   setStatus("项目已保存为 JSON");
@@ -1469,7 +1527,8 @@ function normalizeProject(proj) {
       diagnoses: Array.isArray(p.diagnoses) ? p.diagnoses : [],
       order: Number.isFinite(p.order) ? p.order : i + 1
     })),
-    relationships: proj.relationships
+    relationships: proj.relationships,
+    familyUnits: Array.isArray(proj.familyUnits) ? proj.familyUnits : []
   };
 }
 
