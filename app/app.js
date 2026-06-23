@@ -1,13 +1,14 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 3.0
-   纯前端、本地优先。重点：可靠的递归自动排版 + 规范渲染 + 顺手录入。
+   精神科遗传家族谱系图绘制工具 3.1
+   纯前端、本地优先。重点：连线永不断开（横线覆盖下降点）、
+   同代多家庭同胞横线自动错层、可靠的自动排版 + 规范渲染。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "3.0";
+const VERSION = "3.1";
 
 /* ---- 比例常量（以符号尺寸为基准，参考 NSGC/Bennett 规则）---- */
 const NODE_SIZE = 44;
@@ -542,7 +543,8 @@ function resolveOverlaps(gen) {
       const gapNeed = row[i - 1].x + minGap;
       if (row[i].x < gapNeed) {
         const shift = gapNeed - row[i].x;
-        row[i].x += shift; // 仅右推当前，避免破坏左侧已对齐的家庭
+        // 整块右推：当前及其右侧全部平移，保持右侧家庭内部对齐不被破坏
+        for (let j = i; j < row.length; j++) row[j].x += shift;
       }
     }
   });
@@ -651,44 +653,63 @@ function drawGenerationLabels(root) {
 
 function drawRelationships(root) {
   const units = collectFamilyUnits();
-  const twoParentChildren = new Set(units.filter((u) => u.parentIds.length === 2).flatMap((u) => u.children.map((c) => c.id)));
 
-  // 配偶线
+  // 配偶线：同排水平连接；若两人不同高（被拖动过），画台阶折线保证连通
   state.project.relationships.filter((r) => r.type === "partner").forEach((r) => {
     const a = getPerson(r.person1), b = getPerson(r.person2);
     if (!a || !b) return;
-    const y = (a.y + b.y) / 2;
-    root.appendChild(svgEl("line", { x1: Math.min(a.x, b.x) + R, y1: y, x2: Math.max(a.x, b.x) - R, y2: y, class: "marriage-line" }));
+    const [l, rt] = a.x <= b.x ? [a, b] : [b, a];
+    if (Math.abs(l.y - rt.y) < 1) {
+      root.appendChild(svgEl("line", { x1: l.x + R, y1: l.y, x2: rt.x - R, y2: rt.y, class: "marriage-line" }));
+    } else {
+      const mx = (l.x + rt.x) / 2;
+      root.appendChild(svgEl("path", { d: `M ${l.x + R} ${l.y} H ${mx} V ${rt.y} H ${rt.x - R}`, class: "marriage-line" }));
+    }
   });
 
-  // 双亲家庭：下降线 + 同胞横线 + 个体线
-  units.filter((u) => u.parentIds.length === 2).forEach((u) => {
-    const pa = getPerson(u.parentIds[0]), pb = getPerson(u.parentIds[1]);
-    if (!pa || !pb) return;
-    const midX = (pa.x + pb.x) / 2;
-    const marriageY = (pa.y + pb.y) / 2;
+  /* 家庭单元连线（双亲与单亲统一处理）：
+     - 同胞横线的范围强制覆盖下降点 dropX，无论子女如何错位，线都保持连通；
+     - 独生子女偏离下降点时，同样补一段水平线连到下降竖线；
+     - 同一子代行内，水平范围重叠的不同家庭横线自动错开高度，避免混成一条。 */
+  const fams = units.map((u) => {
+    const pa = getPerson(u.parentIds[0]);
+    const pb = u.parentIds.length === 2 ? getPerson(u.parentIds[1]) : null;
+    if (!pa || (u.parentIds.length === 2 && !pb)) return null;
+    const dropX = pb ? (pa.x + pb.x) / 2 : pa.x;
+    const dropTopY = pb ? (pa.y + pb.y) / 2 : pa.y + R;
     const childTopY = Math.min(...u.children.map((c) => c.y)) - R;
-    const sibY = childTopY - SIBSHIP_DROP + R;
-    root.appendChild(svgEl("line", { x1: midX, y1: marriageY, x2: midX, y2: sibY, class: "descent-line" }));
     const xs = u.children.map((c) => c.x);
-    if (u.children.length > 1) {
-      root.appendChild(svgEl("line", { x1: Math.min(...xs), y1: sibY, x2: Math.max(...xs), y2: sibY, class: "sibling-line" }));
-    }
-    u.children.forEach((c) => root.appendChild(svgEl("line", { x1: c.x, y1: sibY, x2: c.x, y2: c.y - R, class: "individual-line" })));
+    const lo = Math.min(...xs, dropX), hi = Math.max(...xs, dropX);
+    return { u, dropX, dropTopY, childTopY, lo, hi, level: 0 };
+  }).filter(Boolean);
+
+  // 按子代行分组，行内做区间错层（贪心着色）
+  const rows = new Map();
+  fams.forEach((f) => {
+    const key = Math.round(f.childTopY / GENERATION_GAP);
+    if (!rows.has(key)) rows.set(key, []);
+    rows.get(key).push(f);
+  });
+  const CLEAR = 14;       // 同高横线之间需保持的水平净距
+  const LEVEL_STEP = 10;  // 相邻错层的高度差
+  rows.forEach((arr) => {
+    arr.sort((a, b) => a.lo - b.lo || a.hi - b.hi);
+    const placed = [];
+    arr.forEach((f) => {
+      let lvl = 0;
+      while (placed.some((g) => g.level === lvl && f.lo < g.hi + CLEAR && g.lo < f.hi + CLEAR)) lvl++;
+      f.level = lvl;
+      placed.push(f);
+    });
   });
 
-  // 单亲家庭
-  units.filter((u) => u.parentIds.length === 1).forEach((u) => {
-    const parent = getPerson(u.parentIds[0]);
-    if (!parent) return;
-    const childTopY = Math.min(...u.children.map((c) => c.y)) - R;
-    const sibY = childTopY - SIBSHIP_DROP + R;
-    root.appendChild(svgEl("line", { x1: parent.x, y1: parent.y + R, x2: parent.x, y2: sibY, class: "descent-line" }));
-    const xs = u.children.map((c) => c.x);
-    if (u.children.length > 1) {
-      root.appendChild(svgEl("line", { x1: Math.min(...xs), y1: sibY, x2: Math.max(...xs), y2: sibY, class: "sibling-line" }));
+  fams.forEach((f) => {
+    const sibY = f.childTopY - SIBSHIP_DROP + R - f.level * LEVEL_STEP;
+    root.appendChild(svgEl("line", { x1: f.dropX, y1: f.dropTopY, x2: f.dropX, y2: sibY, class: "descent-line" }));
+    if (f.hi - f.lo > 0.5) {
+      root.appendChild(svgEl("line", { x1: f.lo, y1: sibY, x2: f.hi, y2: sibY, class: "sibling-line" }));
     }
-    u.children.forEach((c) => root.appendChild(svgEl("line", { x1: c.x, y1: sibY, x2: c.x, y2: c.y - R, class: "individual-line" })));
+    f.u.children.forEach((c) => root.appendChild(svgEl("line", { x1: c.x, y1: sibY, x2: c.x, y2: c.y - R, class: "individual-line" })));
   });
 }
 
@@ -1126,7 +1147,7 @@ function buildExportSvg() {
   });
   svg.appendChild(svgEl("rect", { x: vbX, y: vbY, width: W, height: Hh, fill: "#ffffff" }));
   svg.appendChild(buildDefs());
-  const style = document.createElement("style");
+  const style = svgEl("style");
   style.textContent = exportStyles();
   svg.appendChild(style);
   const g = svgEl("g");
