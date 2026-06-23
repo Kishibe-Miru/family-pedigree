@@ -1,18 +1,18 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 4.5
+   精神科遗传家族谱系图绘制工具 4.6
    纯前端、本地优先。本版新增：双胞胎（同卵/异卵）、携带者圆点、
    近亲婚配自动双线、拖动自由摆放开关、一键生成家族史文字。
    4.1：连线 T 形修复；新增"与已选成员结婚"连接已有节点为配偶；
         家族史不再把占位默认名当真名；删除孪生后清理孤立 twinGroup。
    4.2：固定同胞出生顺序；同胞小家庭整体平移；多配偶/半同胞婚配线避让。
-   4.5：父母下降线对齐血缘子女本人锚点，而非子女夫妻超级节点中心。
+   4.6：同代避让改为家庭块/夫妻节点级，避免同胞插入核心家庭块导致连线误挂。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "4.5";
+const VERSION = "4.6";
 
 // 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
 const PLACEHOLDER_NAMES = new Set([
@@ -690,6 +690,7 @@ function autoLayout() {
   enforceSiblingBirthOrder(nodes, nodeOf, childrenOf);
   // 同胞顺序重排会移动夫妻节点，需再次按血缘子女锚点收敛。
   alignFamilyChildAnchors(familyUnits, nodeOf, childrenOf, maxGen);
+  resolveNodeOverlaps(nodes, childrenOf);
 
   /* 6. 写回成员坐标 */
   nodes.forEach((n) => {
@@ -704,7 +705,6 @@ function autoLayout() {
     }
   });
 
-  resolveOverlaps(gen);
   // 还原手动摆放位置（在归一化前还原，使其与其他节点一同平移，保持相对关系）
   manualPos.forEach((pos, id) => { const p = getPerson(id); if (p) { p.x = pos.x; p.y = pos.y; } });
   normalizeToOrigin();
@@ -766,6 +766,23 @@ function moveNodeWithDescendants(node, dx, childrenOf) {
   if (!node || Math.abs(dx) < 0.1) return;
   node.cx += dx;
   shiftDescendantNodes(node, dx, childrenOf);
+}
+
+function resolveNodeOverlaps(nodes, childrenOf) {
+  const rows = new Map();
+  nodes.forEach((n) => {
+    if (!rows.has(n.gen)) rows.set(n.gen, []);
+    rows.get(n.gen).push(n);
+  });
+  rows.forEach((row) => {
+    row.sort((a, b) => a.cx - b.cx || Math.min(...a.members.map((id) => getPerson(id).order)) - Math.min(...b.members.map((id) => getPerson(id).order)));
+    for (let i = 1; i < row.length; i++) {
+      const prev = row[i - 1], cur = row[i];
+      const minGap = prev.width / 2 + PERSON_GAP * 0.35 + cur.width / 2;
+      const minCx = prev.cx + minGap;
+      if (cur.cx < minCx) moveNodeWithDescendants(cur, minCx - cur.cx, childrenOf);
+    }
+  });
 }
 
 function enforceSiblingBirthOrder(nodes, nodeOf, childrenOf) {
@@ -1012,7 +1029,7 @@ function drawRelationships(root) {
   fams.forEach((f) => {
     const sibY = f.childTopY - SIBSHIP_DROP + R - f.level * LEVEL_STEP;
     root.appendChild(svgEl("line", { x1: f.dropX, y1: f.dropTopY, x2: f.dropX, y2: sibY, class: "descent-line" }));
-    drawSiblingLine(root, f, sibY);
+    drawSiblingLine(root, f, sibY, fams);
     // 将子女按 twinGroup 分组：单胎从横线垂直下降；双胎从同一顶点斜线分叉
     const singles = [], twinGroups = new Map();
     f.u.children.forEach((c) => {
@@ -1043,17 +1060,50 @@ function drawRelationships(root) {
   });
 }
 
-function drawSiblingLine(root, f, sibY) {
+function drawSiblingLine(root, f, sibY, fams = []) {
   if (f.hi - f.lo <= 0.5) return;
   const childXs = f.u.children.map((c) => c.x).sort((a, b) => a - b);
   const anchors = [...new Set([...childXs, f.dropX].map((x) => Math.round(x * 100) / 100))].sort((a, b) => a - b);
-  if (childXs.length < 6 || anchors.length < 3) {
-    root.appendChild(svgEl("line", { x1: f.lo, y1: sibY, x2: f.hi, y2: sibY, class: "sibling-line" }));
-    return;
-  }
-  for (let i = 0; i < anchors.length - 1; i++) {
-    root.appendChild(svgEl("line", { x1: anchors[i], y1: sibY, x2: anchors[i + 1], y2: sibY, class: "sibling-line" }));
-  }
+  const baseSegments = (childXs.length < 6 || anchors.length < 3)
+    ? [[f.lo, f.hi]]
+    : anchors.slice(0, -1).map((x, i) => [x, anchors[i + 1]]);
+  const childIdSet = new Set(f.u.childIds);
+  const blockers = [];
+
+  state.project.people.forEach((p) => {
+    if (childIdSet.has(p.id)) return;
+    if (Math.abs(p.y - (f.childTopY + R)) > 1) return;
+    if (p.x > f.lo && p.x < f.hi) blockers.push({ x: p.x, gap: R + 6 });
+  });
+  fams.forEach((other) => {
+    if (other === f) return;
+    const otherSibY = other.childTopY - SIBSHIP_DROP + R - other.level * 10;
+    const y1 = Math.min(other.dropTopY, otherSibY);
+    const y2 = Math.max(other.dropTopY, otherSibY);
+    if (sibY > y1 && sibY < y2 && other.dropX > f.lo && other.dropX < f.hi) {
+      blockers.push({ x: other.dropX, gap: 10 });
+    }
+  });
+
+  const segments = baseSegments.flatMap(([x1, x2]) => splitSegmentByBlockers(x1, x2, blockers));
+  segments.forEach(([x1, x2]) => {
+    if (x2 - x1 > 1) root.appendChild(svgEl("line", { x1, y1: sibY, x2, y2: sibY, class: "sibling-line" }));
+  });
+}
+
+function splitSegmentByBlockers(x1, x2, blockers) {
+  let segments = [[x1, x2]];
+  blockers.forEach((b) => {
+    const lo = b.x - b.gap, hi = b.x + b.gap;
+    segments = segments.flatMap(([a, c]) => {
+      if (hi <= a || lo >= c) return [[a, c]];
+      const out = [];
+      if (lo > a) out.push([a, lo]);
+      if (hi < c) out.push([hi, c]);
+      return out;
+    });
+  });
+  return segments;
 }
 
 function computeMarriageNodes() {
