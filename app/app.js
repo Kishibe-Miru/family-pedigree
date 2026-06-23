@@ -1,18 +1,18 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 4.6
+   精神科遗传家族谱系图绘制工具 4.7
    纯前端、本地优先。本版新增：双胞胎（同卵/异卵）、携带者圆点、
    近亲婚配自动双线、拖动自由摆放开关、一键生成家族史文字。
    4.1：连线 T 形修复；新增"与已选成员结婚"连接已有节点为配偶；
         家族史不再把占位默认名当真名；删除孪生后清理孤立 twinGroup。
    4.2：固定同胞出生顺序；同胞小家庭整体平移；多配偶/半同胞婚配线避让。
-   4.6：同代避让改为家庭块/夫妻节点级，避免同胞插入核心家庭块导致连线误挂。
+   4.7：婚配线固定同代水平连接；同胞线仅覆盖子女范围并使用线路层避让。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "4.6";
+const VERSION = "4.7";
 
 // 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
 const PLACEHOLDER_NAMES = new Set([
@@ -944,6 +944,10 @@ function buildDefs() {
   pat.appendChild(svgEl("rect", { width: 7, height: 7, fill: "#fff" }));
   pat.appendChild(svgEl("rect", { width: 3.5, height: 7, fill: "#2f3a42" }));
   defs.appendChild(pat);
+  const carrierPat = svgEl("pattern", { id: "carrierPattern", width: 8, height: 8, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" });
+  carrierPat.appendChild(svgEl("rect", { width: 8, height: 8, fill: "#fff" }));
+  carrierPat.appendChild(svgEl("rect", { width: 2.4, height: 8, fill: "#2f3a42" }));
+  defs.appendChild(carrierPat);
   const mk = svgEl("marker", { id: "arrow", markerWidth: 9, markerHeight: 9, refX: 7, refY: 3, orient: "auto", markerUnits: "strokeWidth" });
   mk.appendChild(svgEl("path", { d: "M0,0 L0,6 L8,3 z", fill: "#2f3a42" }));
   defs.appendChild(mk);
@@ -1002,7 +1006,7 @@ function drawRelationships(root) {
     const dropTopY = pb ? (marriageNode ? marriageNode.y : (pa.y + pb.y) / 2) : pa.y + R;
     const childTopY = Math.min(...u.children.map((c) => c.y)) - R;
     const xs = u.children.map((c) => c.x);
-    const lo = Math.min(...xs, dropX), hi = Math.max(...xs, dropX);
+    const lo = Math.min(...xs), hi = Math.max(...xs);
     return { u, marriageNode, dropX, dropTopY, childTopY, lo, hi, level: 0 };
   }).filter(Boolean);
 
@@ -1109,12 +1113,6 @@ function splitSegmentByBlockers(x1, x2, blockers) {
 function computeMarriageNodes() {
   const routes = new Map();
   const rels = state.project.relationships.filter((r) => r.type === "partner");
-  const sameRow = [];
-  const partnerDegree = new Map();
-  rels.forEach((r) => {
-    partnerDegree.set(r.person1, (partnerDegree.get(r.person1) || 0) + 1);
-    partnerDegree.set(r.person2, (partnerDegree.get(r.person2) || 0) + 1);
-  });
 
   rels.forEach((r) => {
     const a = getPerson(r.person1), b = getPerson(r.person2);
@@ -1123,14 +1121,15 @@ function computeMarriageNodes() {
     const key = coupleKey([a.id, b.id]);
     const id = marriageNodeId([a.id, b.id]);
     if (Math.abs(l.y - rt.y) < 1) {
-      const y = l.y;
       const x1 = l.x + R, x2 = rt.x - R;
-      const blocked = state.project.people.some((p) =>
-        p.id !== l.id && p.id !== rt.id &&
-        Math.abs(p.y - y) < 1 &&
-        p.x - R < x2 && p.x + R > x1);
-      const multiPartner = (partnerDegree.get(l.id) || 0) > 1 || (partnerDegree.get(rt.id) || 0) > 1;
-      sameRow.push({ key, id, l, rt, y, x1, x2, blocked, multiPartner });
+      routes.set(key, {
+        id,
+        kind: "line",
+        x: (x1 + x2) / 2,
+        y: l.y,
+        left: { x: x1, y: l.y },
+        right: { x: x2, y: rt.y }
+      });
     } else {
       const mx = (l.x + rt.x) / 2;
       const my = (l.y + rt.y) / 2;
@@ -1146,45 +1145,6 @@ function computeMarriageNodes() {
       });
     }
   });
-
-  const laneUse = new Map();
-  sameRow
-    .sort((a, b) => a.y - b.y || a.x1 - b.x1 || a.x2 - b.x2)
-    .forEach((r) => {
-      const mx = (r.x1 + r.x2) / 2;
-      if (!r.blocked && !r.multiPartner) {
-        routes.set(r.key, {
-          id: r.id,
-          kind: "line",
-          x: mx,
-          y: r.y,
-          left: { x: r.x1, y: r.y },
-          right: { x: r.x2, y: r.y }
-        });
-        return;
-      }
-
-      const rowKey = Math.round(r.y);
-      const used = laneUse.get(rowKey) || [];
-      let lane = 0;
-      while (used.some((u) => u.lane === lane && r.x1 < u.x2 + 12 && u.x1 < r.x2 + 12)) lane++;
-      used.push({ lane, x1: r.x1, x2: r.x2 });
-      laneUse.set(rowKey, used);
-
-      const laneY = r.y - R - 18 - lane * 12;
-      const d = `M ${r.x1} ${r.y} V ${laneY} H ${r.x2} V ${r.y}`;
-      const d2 = `M ${r.x1 + 3} ${r.y} V ${laneY + 4} H ${r.x2 - 3} V ${r.y}`;
-      routes.set(r.key, {
-        id: r.id,
-        kind: "path",
-        x: mx,
-        y: laneY,
-        left: { x: r.x1, y: r.y },
-        right: { x: r.x2, y: r.y },
-        d,
-        d2
-      });
-    });
 
   return routes;
 }
@@ -1228,11 +1188,6 @@ function drawPerson(root, p) {
     g.appendChild(svgEl("polygon", { points: `${p.x},${p.y - R} ${p.x + R},${p.y} ${p.x},${p.y + R} ${p.x - R},${p.y}`, class: cls }));
   }
 
-  // 携带者：符号中心实心圆点
-  if (p.affectedStatus === "carrier") {
-    g.appendChild(svgEl("circle", { cx: p.x, cy: p.y, r: 5, class: "carrier-dot" }));
-  }
-
   if (p.deceased) {
     g.appendChild(svgEl("line", { x1: p.x - R * 1.25, y1: p.y + R * 1.25, x2: p.x + R * 1.25, y2: p.y - R * 1.25, class: "deceased-line" }));
   }
@@ -1272,7 +1227,7 @@ function drawLegend(root) {
     { kind: "diamond", fill: "#e2e8ec", text: "性别未知" },
     { kind: "rect", fill: "#2f3a42", text: "患病" },
     { kind: "rect", fill: "url(#suspectedPattern)", text: "疑似" },
-    { kind: "carrier", text: "携带者（中心点）" },
+    { kind: "carrier", text: "携带者（纹理）" },
     { kind: "deceased", text: "已故（／）" },
     { kind: "proband", text: "先证者（箭头 P）" },
     { kind: "twin", text: "双胞胎（同卵带横杆）" },
@@ -1296,8 +1251,7 @@ function drawLegend(root) {
       g.appendChild(svgEl("rect", { x: sx - r, y: cy - r, width: r * 2, height: r * 2, fill: "#fff", stroke: "#2f3a42", "stroke-width": 2 }));
       g.appendChild(svgEl("line", { x1: sx - r - 12, y1: cy + r + 8, x2: sx - r + 1, y2: cy + r - 1, stroke: "#2f3a42", "stroke-width": 2, "marker-end": "url(#arrow)" }));
     } else if (it.kind === "carrier") {
-      g.appendChild(svgEl("circle", { cx: sx, cy, r, fill: "#fff", stroke: "#2f3a42", "stroke-width": 2 }));
-      g.appendChild(svgEl("circle", { cx: sx, cy, r: 3, fill: "#2f3a42" }));
+      g.appendChild(svgEl("circle", { cx: sx, cy, r, fill: "url(#carrierPattern)", stroke: "#2f3a42", "stroke-width": 2 }));
     } else if (it.kind === "twin") {
       g.appendChild(svgEl("line", { x1: sx, y1: cy - r, x2: sx - r, y2: cy + r, stroke: "#2f3a42", "stroke-width": 2 }));
       g.appendChild(svgEl("line", { x1: sx, y1: cy - r, x2: sx + r, y2: cy + r, stroke: "#2f3a42", "stroke-width": 2 }));
@@ -1707,8 +1661,7 @@ function exportStyles() {
   .person-symbol.affected{fill:#2f3a42}
   .person-symbol.suspected{fill:url(#suspectedPattern)}
   .person-symbol.unknown{fill:#e2e8ec}
-  .person-symbol.carrier{fill:#fff}
-  .carrier-dot{fill:#2f3a42}
+  .person-symbol.carrier{fill:url(#carrierPattern)}
   .twin-bar{stroke:#2f3a42;stroke-width:2.2}
   .person-label{font:13px "Microsoft YaHei",sans-serif;fill:#172026;text-anchor:middle;dominant-baseline:hanging}
   .id-label{font:600 12px "Microsoft YaHei",sans-serif;fill:#3a444c;text-anchor:end;dominant-baseline:hanging}

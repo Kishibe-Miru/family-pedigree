@@ -190,8 +190,7 @@ kbd {
 .person-symbol.affected { fill: var(--node-ink); }
 .person-symbol.suspected { fill: url(#suspectedPattern); }
 .person-symbol.unknown { fill: #e2e8ec; }
-.person-symbol.carrier { fill: #fff; }
-.carrier-dot { fill: var(--node-ink); }
+.person-symbol.carrier { fill: url(#carrierPattern); }
 .twin-bar { stroke: var(--node-ink); stroke-width: 2.2; }
 .person-label { font: 13px "Microsoft YaHei", sans-serif; fill: #172026; text-anchor: middle; dominant-baseline: hanging; }
 .id-label { font: 600 12px "Microsoft YaHei", sans-serif; fill: #3a444c; text-anchor: end; dominant-baseline: hanging; }
