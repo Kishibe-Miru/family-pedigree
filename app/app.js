@@ -1,1972 +1,1216 @@
-﻿const svg = document.getElementById("pedigreeSvg");
-const nodeLayer = document.getElementById("nodeLayer");
-const relationshipLayer = document.getElementById("relationshipLayer");
-const canvasWrap = document.getElementById("canvasWrap");
-const statusText = document.getElementById("statusText");
-const nodeContextMenu = document.getElementById("nodeContextMenu");
-let contextMenuPersonId = null;
-let submenuCloseTimer = null;
-
-const form = {
-  label: document.getElementById("personLabel"),
-  sex: document.getElementById("personSex"),
-  age: document.getElementById("personAge"),
-  disease: document.getElementById("personDisease"),
-  onset: document.getElementById("personOnset"),
-  mental: document.getElementById("personMental"),
-  suicide: document.getElementById("personSuicide"),
-  substance: document.getElementById("personSubstance"),
-  status: document.getElementById("personStatus"),
-  generation: document.getElementById("personGeneration"),
-  deceased: document.getElementById("personDeceased"),
-  proband: document.getElementById("personProband"),
-  notes: document.getElementById("personNotes"),
-};
-
-const layoutControls = {
-  nodeSize: document.getElementById("nodeSizeRange"),
-  nodeSizeValue: document.getElementById("nodeSizeValue"),
-  generationSpacing: document.getElementById("generationSpacingRange"),
-  generationSpacingValue: document.getElementById("generationSpacingValue"),
-  siblingSpacing: document.getElementById("siblingSpacingRange"),
-  siblingSpacingValue: document.getElementById("siblingSpacingValue"),
-  layoutSpacing: document.getElementById("layoutSpacingRange"),
-  layoutSpacingValue: document.getElementById("layoutSpacingValue"),
-};
-
-const DEFAULT_LAYOUT = {
-  nodeSize: 56,
-  generationSpacing: 200,
-  siblingSpacing: 180,
-  layoutSpacing: 190,
-};
+const AUTOSAVE_KEY = "psychiatric-pedigree-v2-autosave";
+const SVG_NS = "http://www.w3.org/2000/svg";
+const NODE_SIZE = 44;
+const NODE_RADIUS = NODE_SIZE / 2;
+const PERSON_GAP = NODE_SIZE * 3.2;
+const GENERATION_GAP = NODE_SIZE * 3.9;
+const MIN_NODE_GAP = NODE_SIZE * 3.05;
+const LINE_NODE_PADDING = NODE_SIZE * 1.15;
+const FAMILY_TRACK_STEP = NODE_SIZE * 0.38;
+const SIBSHIP_LINE_OFFSET = NODE_SIZE * 1.15;
+const LABEL_OFFSET = NODE_SIZE * 0.78;
+const DIAGNOSIS_OFFSET = NODE_SIZE * 1.2;
+const CANVAS_CENTER_X = 560;
+const FIRST_GENERATION_Y = 120;
 
 const state = {
-  people: [],
-  relationships: [],
+  project: createProject(),
   selectedPersonId: null,
-  selectedRelationshipId: null,
-  connectMode: false,
-  pendingConnectionId: null,
-  relationType: "partner",
-  nextPersonNumber: 1,
-  layout: { ...DEFAULT_LAYOUT },
+  scale: 1,
+  offsetX: 0,
+  offsetY: 0,
+  dragging: null
 };
 
-const STORAGE_KEY = "local-pedigree-mvp";
-const NS = "http://www.w3.org/2000/svg";
-const GENERATIONS = [
-  { index: 0, label: "I", name: "祖辈" },
-  { index: 1, label: "II", name: "父母辈" },
-  { index: 2, label: "III", name: "先证者/同胞" },
-  { index: 3, label: "IV", name: "子代" },
-  { index: 4, label: "V", name: "后代" },
-];
-const MIN_NODE_X = 180;
-const MAX_NODE_X = 2200;
-const CANVAS_WIDTH = 2400;
-const CANVAS_HEIGHT = 1300;
+const els = {};
 
-function createSvgElement(tag, attrs = {}) {
-  const element = document.createElementNS(NS, tag);
-  Object.entries(attrs).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) {
-      element.setAttribute(key, String(value));
-    }
+document.addEventListener("DOMContentLoaded", init);
+
+function init() {
+  cacheElements();
+  bindEvents();
+  const restored = restoreAutosave();
+  if (!restored) {
+    setStatus("新项目已创建");
+  }
+  updateControls();
+  renderAll();
+}
+
+function cacheElements() {
+  [
+    "projectMeta", "newProjectBtn", "saveJsonBtn", "loadJsonInput", "exportPngBtn",
+    "addPersonBtn", "setProbandBtn", "deletePersonBtn", "addFatherBtn", "addMotherBtn",
+    "addPartnerBtn", "addChildBtn", "addSiblingBtn", "autoLayoutBtn", "zoomInBtn",
+    "zoomOutBtn", "resetViewBtn", "projectTitleInput", "statusLine", "canvasWrap",
+    "pedigreeSvg", "emptySelection", "personForm", "personName", "personSex",
+    "personAge", "personBirthYear", "personAffectedStatus", "diagnosisSelect",
+    "diagnosisTags", "personDeceased", "personProband", "personNotes"
+  ].forEach((id) => {
+    els[id] = document.getElementById(id);
   });
-  return element;
 }
 
-function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+function bindEvents() {
+  els.newProjectBtn.addEventListener("click", newProject);
+  els.saveJsonBtn.addEventListener("click", saveProjectJson);
+  els.loadJsonInput.addEventListener("change", loadProjectJson);
+  els.exportPngBtn.addEventListener("click", exportPng);
+  els.addPersonBtn.addEventListener("click", () => addPerson());
+  els.setProbandBtn.addEventListener("click", setSelectedAsProband);
+  els.deletePersonBtn.addEventListener("click", deleteSelectedPerson);
+  els.addFatherBtn.addEventListener("click", () => addParent("male"));
+  els.addMotherBtn.addEventListener("click", () => addParent("female"));
+  els.addPartnerBtn.addEventListener("click", addPartner);
+  els.addChildBtn.addEventListener("click", addChild);
+  els.addSiblingBtn.addEventListener("click", addSibling);
+  els.autoLayoutBtn.addEventListener("click", () => {
+    clearManualPositions();
+    autoLayout(true);
+    commitChange("已自动排版");
+  });
+  els.zoomInBtn.addEventListener("click", () => setZoom(state.scale + 0.12));
+  els.zoomOutBtn.addEventListener("click", () => setZoom(state.scale - 0.12));
+  els.resetViewBtn.addEventListener("click", resetView);
+  els.projectTitleInput.addEventListener("input", () => {
+    state.project.title = els.projectTitleInput.value.trim() || "未命名家系图";
+    commitChange("项目名称已更新", false);
+  });
+
+  [
+    "personName", "personSex", "personAge", "personBirthYear",
+    "personAffectedStatus", "personNotes"
+  ].forEach((id) => {
+    els[id].addEventListener("input", updateSelectedFromForm);
+  });
+
+  els.personDeceased.addEventListener("change", updateSelectedFromForm);
+  els.personProband.addEventListener("change", updateSelectedFromForm);
+  els.diagnosisSelect.addEventListener("change", addDiagnosisFromSelect);
+  els.pedigreeSvg.addEventListener("pointermove", onPointerMove);
+  els.pedigreeSvg.addEventListener("pointerup", endDrag);
+  els.pedigreeSvg.addEventListener("pointerleave", endDrag);
+  els.canvasWrap.addEventListener("wheel", onCanvasWheel, { passive: false });
 }
 
-function loadState() {
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (!saved) return;
-  try {
-    const parsed = JSON.parse(saved);
-    Object.assign(state, parsed);
-    state.layout = { ...DEFAULT_LAYOUT, ...(parsed.layout || {}) };
-    state.connectMode = false;
-    state.pendingConnectionId = null;
-    state.people.forEach((person) => {
-      person.mental = Boolean(person.mental);
-      person.suicide = Boolean(person.suicide);
-      person.substance = Boolean(person.substance);
-      if (!Number.isInteger(person.generation)) {
-        person.generation = generationFromY(person.y);
-      }
-      person.y = generationY(person.generation);
-    });
-  } catch {
-    localStorage.removeItem(STORAGE_KEY);
-  }
-}
-
-function updateStatus(text) {
-  statusText.textContent = text;
-}
-
-function getMousePosition(event) {
-  const point = svg.createSVGPoint();
-  point.x = event.clientX;
-  point.y = event.clientY;
-  return point.matrixTransform(svg.getScreenCTM().inverse());
-}
-
-function addPerson(sex, x, y, fields = {}) {
-  const generation = Number.isInteger(fields.generation) ? fields.generation : generationFromY(y);
-  const person = {
-    id: crypto.randomUUID(),
-    label: fields.label || `成员 ${state.nextPersonNumber}`,
-    sex,
-    age: fields.age || "",
-    disease: fields.disease || "",
-    onset: fields.onset || "",
-    mental: Boolean(fields.mental),
-    suicide: Boolean(fields.suicide),
-    substance: Boolean(fields.substance),
-    status: fields.status || "unaffected",
-    deceased: Boolean(fields.deceased),
-    proband: Boolean(fields.proband),
-    notes: fields.notes || "",
-    generation,
-    x: clampX(x),
-    y: generationY(generation),
+function createProject() {
+  const now = new Date().toISOString();
+  return {
+    version: "2.0",
+    title: "未命名家系图",
+    createdAt: now,
+    updatedAt: now,
+    people: [],
+    relationships: [],
+    settings: {
+      showNames: true,
+      showDiagnoses: true,
+      showLegend: true
+    },
+    viewport: {
+      scale: 1,
+      offsetX: 0,
+      offsetY: 0
+    }
   };
-  state.nextPersonNumber += 1;
-  if (person.proband) {
-    state.people.forEach((item) => {
-      item.proband = false;
-    });
-  }
-  state.people.push(person);
-  selectPerson(person.id);
-  refreshKinshipLabels();
-  saveState();
-  render();
 }
 
-function createPerson(sex, x, generation, fields = {}) {
-  const person = {
-    id: crypto.randomUUID(),
-    label: fields.label || `成员 ${state.nextPersonNumber}`,
-    sex,
-    age: fields.age || "",
-    disease: fields.disease || "",
-    onset: fields.onset || "",
-    mental: Boolean(fields.mental),
-    suicide: Boolean(fields.suicide),
-    substance: Boolean(fields.substance),
-    status: fields.status || "unaffected",
-    deceased: Boolean(fields.deceased),
-    proband: Boolean(fields.proband),
-    notes: fields.notes || "",
-    generation: clampGeneration(generation),
-    x: clampX(x),
-    y: generationY(generation),
+function makeId(prefix) {
+  return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function createPerson(overrides = {}) {
+  const index = state.project.people.length + 1;
+  return {
+    id: makeId("p"),
+    name: overrides.name || `成员${index}`,
+    sex: overrides.sex || "unknown",
+    age: "",
+    birthYear: "",
+    affectedStatus: "unknown",
+    diagnoses: [],
+    deceased: false,
+    proband: false,
+    notes: "",
+    x: 0,
+    y: 0,
+    manualPosition: false,
+    layoutOrder: index,
+    ...overrides
   };
-  state.nextPersonNumber += 1;
-  if (person.proband) {
-    state.people.forEach((item) => {
-      item.proband = false;
-    });
+}
+
+function addPerson(overrides = {}) {
+  const person = createPerson(overrides);
+  const wrap = els.canvasWrap.getBoundingClientRect();
+  person.x = (wrap.width / 2 - state.offsetX) / state.scale;
+  person.y = (wrap.height / 2 - state.offsetY) / state.scale;
+  state.project.people.push(person);
+  state.selectedPersonId = person.id;
+  if (state.project.people.length === 1) {
+    person.proband = true;
+    person.name = "先证者";
   }
-  state.people.push(person);
+  commitChange("已添加成员");
   return person;
 }
 
-function addRelationship(sourceId, targetId, type = state.relationType) {
-  if (!sourceId || !targetId || sourceId === targetId) return;
-  const added = addRelationshipRecord(sourceId, targetId, type);
-  if (!added) {
-    updateStatus("这两个人已经存在相同关系");
-    return;
-  }
-  refreshLayoutAfterRelationship(type);
-  normalizeSiblingSpacing();
-  refreshKinshipLabels();
-  state.pendingConnectionId = null;
-  state.connectMode = false;
-  updateConnectButton();
-  saveState();
-  render();
-  updateStatus("已建立关系线");
-}
-
-function addRelationshipRecord(sourceId, targetId, type) {
-  if (!sourceId || !targetId || sourceId === targetId) return false;
-  normalizeGenerationsForRelationship(sourceId, targetId, type);
-  const exists = state.relationships.some(
-    (relation) =>
-      relation.type === type &&
-      ((relation.sourceId === sourceId && relation.targetId === targetId) ||
-        (relation.sourceId === targetId && relation.targetId === sourceId)),
-  );
-  if (exists) return false;
-  state.relationships.push({
-    id: crypto.randomUUID(),
-    sourceId,
-    targetId,
-    type,
+function addRelationship(relationship) {
+  state.project.relationships.push({
+    id: makeId("r"),
+    ...relationship
   });
-  return true;
 }
 
-function addRelative(personId, relativeType) {
-  const person = getPerson(personId);
-  if (!person) return;
-  if (relativeType === "markProband") {
-    markAsProband(person.id);
-    return;
-  }
-  if (relativeType === "father") {
-    addParentForPerson(person, "male", "父亲");
-  }
-  if (relativeType === "mother") {
-    addParentForPerson(person, "female", "母亲");
-  }
-  if (relativeType === "husband") {
-    addSpouseForPerson(person, "male", "丈夫");
-  }
-  if (relativeType === "wife") {
-    addSpouseForPerson(person, "female", "妻子");
-  }
-  if (relativeType === "brother") {
-    addSiblingForPerson(person, "male", "兄弟");
-  }
-  if (relativeType === "sister") {
-    addSiblingForPerson(person, "female", "姐妹");
-  }
-  if (relativeType === "son") {
-    addChildForPerson(person, "male", "儿子");
-  }
-  if (relativeType === "daughter") {
-    addChildForPerson(person, "female", "女儿");
-  }
-  layoutFamilyGroups();
-  normalizeSiblingSpacing();
-  resolveLayoutConflicts();
-  enforcePedigreeLineRules();
-  refreshKinshipLabels();
-  centerDiagramOnCanvas();
-  saveState();
-  render();
-  scrollDiagramIntoView();
+function selectedPerson() {
+  return state.project.people.find((person) => person.id === state.selectedPersonId) || null;
 }
 
-function markAsProband(personId) {
-  const person = getPerson(personId);
-  if (!person) return;
-  state.people.forEach((item) => {
-    item.proband = item.id === personId;
-  });
-  refreshKinshipLabels();
-  selectPerson(personId);
-  saveState();
-  render();
-  updateStatus(`已将${person.label}标记为先证者`);
-}
-
-function addParentForPerson(person, sex, label) {
-  const parentGeneration = clampGeneration((person.generation ?? generationFromY(person.y)) - 1);
-  const offset = sex === "male" ? -state.layout.siblingSpacing / 2 : state.layout.siblingSpacing / 2;
-  const parent = createPerson(sex, person.x + offset, parentGeneration, { label });
-  addRelationshipRecord(parent.id, person.id, "parentChild");
-  connectCoParentIfPresent(parent, person);
-  selectPerson(parent.id);
-  updateStatus(`已添加${label}并建立亲子关系`);
-}
-
-function connectCoParentIfPresent(parent, child) {
-  const coParents = state.relationships
-    .filter((relation) => relation.type === "parentChild" && relation.targetId === child.id && relation.sourceId !== parent.id)
-    .map((relation) => getPerson(relation.sourceId))
-    .filter(Boolean)
-    .filter((candidate) => candidate.generation === parent.generation);
-  const oppositeSex = coParents.find((candidate) => candidate.sex !== parent.sex);
-  if (oppositeSex) {
-    addRelationshipRecord(oppositeSex.id, parent.id, "partner");
-  }
-}
-
-function addSpouseForPerson(person, sex, label) {
-  const direction = chooseSpouseDirection(person, sex);
-  const spouse = createPerson(
-    sex,
-    person.x + direction * state.layout.siblingSpacing,
-    person.generation ?? generationFromY(person.y),
-    { label },
-  );
-  addRelationshipRecord(person.id, spouse.id, "partner");
-  selectPerson(spouse.id);
-  updateStatus(`已添加${label}并建立配偶关系`);
-}
-
-function chooseSpouseDirection(person, spouseSex) {
-  const preferred = spouseSex === "male" ? -1 : 1;
-  const generation = person.generation ?? generationFromY(person.y);
-  const sameGeneration = state.people.filter(
-    (candidate) => candidate.id !== person.id && (candidate.generation ?? generationFromY(candidate.y)) === generation,
-  );
-  const preferredBlocked = sameGeneration.some(
-    (candidate) => Math.abs(candidate.x - (person.x + preferred * state.layout.siblingSpacing)) < state.layout.siblingSpacing * 0.7,
-  );
-  if (!preferredBlocked) return preferred;
-  const alternate = -preferred;
-  const alternateBlocked = sameGeneration.some(
-    (candidate) => Math.abs(candidate.x - (person.x + alternate * state.layout.siblingSpacing)) < state.layout.siblingSpacing * 0.7,
-  );
-  return alternateBlocked ? preferred : alternate;
-}
-
-function addSiblingForPerson(person, sex, label) {
-  const sibling = createPerson(
-    sex,
-    person.x + state.layout.siblingSpacing,
-    person.generation ?? generationFromY(person.y),
-    { label },
-  );
-  const parentRelations = state.relationships.filter(
-    (relation) => relation.type === "parentChild" && relation.targetId === person.id,
-  );
-  parentRelations.forEach((relation) => {
-    addRelationshipRecord(relation.sourceId, sibling.id, "parentChild");
-  });
-  addRelationshipRecord(person.id, sibling.id, "sibling");
-  selectPerson(sibling.id);
-  updateStatus(`已添加${label}并建立同胞关系`);
-}
-
-function addChildForPerson(person, sex, label) {
-  const child = createPerson(
-    sex,
-    person.x,
-    clampGeneration((person.generation ?? generationFromY(person.y)) + 1),
-    { label },
-  );
-  addRelationshipRecord(person.id, child.id, "parentChild");
-  const spouses = getPartners(person.id);
-  spouses.forEach((spouse) => {
-    addRelationshipRecord(spouse.id, child.id, "parentChild");
-  });
-  selectPerson(child.id);
-  updateStatus(`已添加${label}并建立亲子关系`);
-}
-
-function getPartners(personId) {
-  return state.relationships
-    .filter((relation) => relation.type === "partner" && (relation.sourceId === personId || relation.targetId === personId))
-    .map((relation) => getPerson(relation.sourceId === personId ? relation.targetId : relation.sourceId))
-    .filter(Boolean);
-}
-
-function refreshLayoutAfterRelationship(type) {
-  if (type === "partner" || type === "parentChild") {
-    layoutFamilyGroups();
-  }
-  if (type === "sibling") {
-    normalizeSiblingSpacing();
-    centerChildrenUnderParents();
-  }
-  resolveLayoutConflicts();
-  enforcePedigreeLineRules();
-}
-
-function normalizeGenerationsForRelationship(sourceId, targetId, type) {
-  const source = getPerson(sourceId);
-  const target = getPerson(targetId);
-  if (!source || !target) return;
-  const sourceGeneration = source.generation ?? generationFromY(source.y);
-  if (type === "partner" || type === "sibling") {
-    target.generation = sourceGeneration;
-  }
-  if (type === "parentChild") {
-    target.generation = clampGeneration(sourceGeneration + 1);
-  }
-  source.y = generationY(source.generation ?? sourceGeneration);
-  target.y = generationY(target.generation);
-}
-
-function getPerson(id) {
-  return state.people.find((person) => person.id === id);
-}
-
-function selectPerson(id) {
-  state.selectedPersonId = id;
-  state.selectedRelationshipId = null;
-  fillInspector();
-  render();
-}
-
-function selectRelationship(id) {
-  state.selectedRelationshipId = id;
-  state.selectedPersonId = null;
-  fillInspector();
-  render();
-}
-
-function fillInspector() {
-  const person = getPerson(state.selectedPersonId);
-  const disabled = !person;
-  Object.values(form).forEach((input) => {
-    input.disabled = disabled;
-  });
+function requireSelection() {
+  const person = selectedPerson();
   if (!person) {
-    form.label.value = "";
-    form.sex.value = "unknown";
-    form.age.value = "";
-    form.disease.value = "";
-    form.onset.value = "";
-    form.mental.checked = false;
-    form.suicide.checked = false;
-    form.substance.checked = false;
-    form.status.value = "unaffected";
-    form.generation.value = "2";
-    form.deceased.checked = false;
-    form.proband.checked = false;
-    form.notes.value = "";
-    return;
+    setStatus("请先选择一个成员");
+    return null;
   }
-  form.label.value = person.label;
-  form.sex.value = person.sex;
-  form.age.value = person.age;
-  form.disease.value = person.disease;
-  form.onset.value = person.onset;
-  form.mental.checked = Boolean(person.mental);
-  form.suicide.checked = Boolean(person.suicide);
-  form.substance.checked = Boolean(person.substance);
-  form.status.value = person.status;
-  form.generation.value = String(person.generation ?? generationFromY(person.y));
-  form.deceased.checked = person.deceased;
-  form.proband.checked = person.proband;
-  form.notes.value = person.notes;
+  return person;
 }
 
-function updateSelectedPerson() {
-  const person = getPerson(state.selectedPersonId);
+function addParent(sex) {
+  const child = requireSelection();
+  if (!child) return;
+  const basePersonId = child.id;
+  const parent = createPerson({
+    sex,
+    name: sex === "male" ? "父亲" : "母亲",
+    x: child.x + (sex === "male" ? -56 : 56),
+    y: child.y - GENERATION_GAP
+  });
+  state.project.people.push(parent);
+  addRelationship({ type: "parentChild", parent: parent.id, child: child.id });
+  findParents(child.id)
+    .filter((existingParent) => existingParent.id !== parent.id)
+    .forEach((existingParent) => {
+      if (!hasPartnerRelationship(parent.id, existingParent.id)) {
+        addRelationship({ type: "partner", person1: parent.id, person2: existingParent.id, status: "current" });
+      }
+    });
+  state.selectedPersonId = basePersonId;
+  autoLayout(true);
+  commitChange(`已添加${sex === "male" ? "父亲" : "母亲"}`);
+}
+
+function addPartner() {
+  const person = requireSelection();
   if (!person) return;
-  person.label = form.label.value.trim() || "未命名";
-  person.sex = form.sex.value;
-  person.age = form.age.value.trim();
-  person.disease = form.disease.value.trim();
-  person.onset = form.onset.value.trim();
-  person.mental = form.mental.checked;
-  person.suicide = form.suicide.checked;
-  person.substance = form.substance.checked;
-  person.status = form.status.value;
-  person.generation = Number(form.generation.value);
-  person.y = generationY(person.generation);
-  person.deceased = form.deceased.checked;
-  if (form.proband.checked) {
-    state.people.forEach((item) => {
+  const basePersonId = person.id;
+  const partner = createPerson({
+    name: "配偶",
+    sex: person.sex === "male" ? "female" : person.sex === "female" ? "male" : "unknown",
+    x: person.x + PERSON_GAP,
+    y: person.y
+  });
+  state.project.people.push(partner);
+  addRelationship({ type: "partner", person1: person.id, person2: partner.id, status: "current" });
+  state.selectedPersonId = basePersonId;
+  autoLayout(true);
+  commitChange("已添加配偶");
+}
+
+function addChild() {
+  const parent = requireSelection();
+  if (!parent) return;
+  const basePersonId = parent.id;
+  const child = createPerson({
+    name: "子女",
+    x: parent.x,
+    y: parent.y + GENERATION_GAP
+  });
+  state.project.people.push(child);
+  addRelationship({ type: "parentChild", parent: parent.id, child: child.id });
+  const partner = findPartners(parent.id)[0];
+  if (partner) {
+      addRelationship({ type: "parentChild", parent: partner.id, child: child.id });
+  }
+  state.selectedPersonId = basePersonId;
+  autoLayout(true);
+  commitChange("已添加子女");
+}
+
+function addSibling() {
+  const person = requireSelection();
+  if (!person) return;
+  const basePersonId = person.id;
+  const sibling = createPerson({
+    name: "兄弟姐妹",
+    sex: "unknown",
+    x: person.x + PERSON_GAP,
+    y: person.y
+  });
+  state.project.people.push(sibling);
+  const parents = findParents(person.id);
+  parents.forEach((parent) => {
+    addRelationship({ type: "parentChild", parent: parent.id, child: sibling.id });
+  });
+  state.selectedPersonId = basePersonId;
+  autoLayout(true);
+  commitChange("已添加兄弟姐妹");
+}
+
+function deleteSelectedPerson() {
+  const person = requireSelection();
+  if (!person) return;
+  state.project.people = state.project.people.filter((item) => item.id !== person.id);
+  state.project.relationships = state.project.relationships.filter((rel) => !relationshipHasPerson(rel, person.id));
+  state.selectedPersonId = null;
+  commitChange("已删除成员");
+}
+
+function relationshipHasPerson(rel, id) {
+  return rel.parent === id || rel.child === id || rel.person1 === id || rel.person2 === id;
+}
+
+function hasPartnerRelationship(idA, idB) {
+  return state.project.relationships.some((rel) => {
+    if (rel.type !== "partner") return false;
+    return (rel.person1 === idA && rel.person2 === idB) || (rel.person1 === idB && rel.person2 === idA);
+  });
+}
+
+function setSelectedAsProband() {
+  const person = requireSelection();
+  if (!person) return;
+  state.project.people.forEach((item) => {
+    item.proband = item.id === person.id;
+  });
+  commitChange("已设置先证者");
+}
+
+function updateSelectedFromForm() {
+  const person = selectedPerson();
+  if (!person) return;
+  person.name = els.personName.value.trim() || "未命名";
+  person.sex = els.personSex.value;
+  person.age = els.personAge.value.trim();
+  person.birthYear = els.personBirthYear.value.trim();
+  person.affectedStatus = els.personAffectedStatus.value;
+  person.deceased = els.personDeceased.checked;
+  person.notes = els.personNotes.value;
+  if (els.personProband.checked) {
+    state.project.people.forEach((item) => {
       item.proband = item.id === person.id;
     });
   } else {
     person.proband = false;
   }
-  person.notes = form.notes.value.trim();
-  const activeId = document.activeElement?.id;
-  if (["personProband", "personSex", "personGeneration"].includes(activeId)) {
-    refreshKinshipLabels();
+  commitChange("成员属性已更新", false);
+}
+
+function addDiagnosisFromSelect() {
+  const person = selectedPerson();
+  const value = els.diagnosisSelect.value;
+  if (!person || !value) return;
+  if (!person.diagnoses.includes(value)) {
+    person.diagnoses.push(value);
   }
-  saveState();
-  render();
+  els.diagnosisSelect.value = "";
+  commitChange("诊断标签已更新");
 }
 
-function render() {
-  relationshipLayer.replaceChildren();
-  nodeLayer.replaceChildren();
-  renderGenerationGuides();
-  renderRelationships();
-  state.people.forEach(renderPerson);
+function removeDiagnosis(value) {
+  const person = selectedPerson();
+  if (!person) return;
+  person.diagnoses = person.diagnoses.filter((item) => item !== value);
+  commitChange("诊断标签已移除");
 }
 
-function renderGenerationGuides() {
-  GENERATIONS.forEach((generation, index) => {
-    const y = generationY(generation.index);
-    const bandY = index === 0 ? 40 : (generationY(index - 1) + y) / 2;
-    const next = GENERATIONS[index + 1];
-    const bandHeight = next ? (generationY(next.index) + y) / 2 - bandY : 1040 - bandY;
-    relationshipLayer.appendChild(createSvgElement("rect", {
-      x: 0,
-      y: bandY,
-      width: CANVAS_WIDTH,
-      height: bandHeight,
-      class: "generation-band",
-    }));
-    relationshipLayer.appendChild(createSvgElement("line", {
-      x1: 80,
-      y1: y,
-      x2: CANVAS_WIDTH - 80,
-      y2: y,
-      class: "generation-line",
-    }));
-    const label = createSvgElement("text", {
-      x: 32,
-      y: y + 6,
-      class: "generation-label",
-    });
-    label.textContent = generation.label;
-    relationshipLayer.appendChild(label);
+function commitChange(message, rerender = true) {
+  state.project.updatedAt = new Date().toISOString();
+  state.project.viewport = {
+    scale: state.scale,
+    offsetX: state.offsetX,
+    offsetY: state.offsetY
+  };
+  autosave();
+  updateControls();
+  if (rerender) {
+    renderAll();
+  } else {
+    renderAll();
+  }
+  setStatus(message);
+}
+
+function updateControls() {
+  const hasSelection = Boolean(selectedPerson());
+  [
+    els.setProbandBtn, els.deletePersonBtn, els.addFatherBtn, els.addMotherBtn,
+    els.addPartnerBtn, els.addChildBtn, els.addSiblingBtn
+  ].forEach((button) => {
+    button.disabled = !hasSelection;
+  });
+  els.projectTitleInput.value = state.project.title;
+  els.projectMeta.textContent = `${state.project.title} · ${state.project.people.length} 名成员`;
+  renderForm();
+}
+
+function renderForm() {
+  const person = selectedPerson();
+  els.emptySelection.hidden = Boolean(person);
+  els.personForm.hidden = !person;
+  if (!person) return;
+  els.personName.value = person.name || "";
+  els.personSex.value = person.sex || "unknown";
+  els.personAge.value = person.age || "";
+  els.personBirthYear.value = person.birthYear || "";
+  els.personAffectedStatus.value = person.affectedStatus || "unknown";
+  els.personDeceased.checked = Boolean(person.deceased);
+  els.personProband.checked = Boolean(person.proband);
+  els.personNotes.value = person.notes || "";
+  els.diagnosisTags.innerHTML = "";
+  person.diagnoses.forEach((diagnosis) => {
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = diagnosis;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "x";
+    button.title = "移除诊断";
+    button.addEventListener("click", () => removeDiagnosis(diagnosis));
+    tag.appendChild(button);
+    els.diagnosisTags.appendChild(tag);
   });
 }
 
-function renderRelationships() {
-  const partnerRelations = state.relationships.filter((relation) => relation.type === "partner");
-  const siblingRelations = state.relationships.filter((relation) => relation.type === "sibling");
-  const parentChildRelations = state.relationships.filter((relation) => relation.type === "parentChild");
-  const groupedChildIds = new Set();
+function renderAll() {
+  const svg = els.pedigreeSvg;
+  svg.innerHTML = "";
+  const wrap = els.canvasWrap.getBoundingClientRect();
+  svg.setAttribute("viewBox", `0 0 ${Math.max(wrap.width, 800)} ${Math.max(wrap.height, 560)}`);
+  svg.appendChild(createDefs());
 
-  partnerRelations.forEach((relation) => {
-    renderPartnerRelationship(relation);
-    const source = getPerson(relation.sourceId);
-    const target = getPerson(relation.targetId);
-    if (!source || !target) return;
+  const graph = svgEl("g", {
+    transform: `translate(${state.offsetX}, ${state.offsetY}) scale(${state.scale})`
+  });
+  svg.appendChild(graph);
 
-    const children = parentChildRelations
-      .filter(
-        (candidate) =>
-          candidate.sourceId === source.id ||
-          candidate.sourceId === target.id,
-      )
-      .map((candidate) => candidate.targetId)
-      .filter((childId, index, ids) => ids.indexOf(childId) === index)
-      .map(getPerson)
-      .filter(Boolean)
-      .sort((a, b) => a.x - b.x);
+  if (state.project.people.length === 0) {
+    graph.appendChild(svgEl("text", {
+      x: Math.max(wrap.width, 800) / 2,
+      y: Math.max(wrap.height, 560) / 2,
+      class: "empty-canvas-text"
+    }, "点击左侧“添加成员”开始"));
+    return;
+  }
 
-    if (children.length) {
-      renderChildGroup(relation, source, target, children, parentChildRelations);
-      children.forEach((child) => groupedChildIds.add(child.id));
+  renderGenerationLabels(graph);
+  renderRelationships(graph);
+  state.project.people.forEach((person) => renderPerson(graph, person));
+}
+
+function createDefs() {
+  const defs = svgEl("defs");
+  const pattern = svgEl("pattern", {
+    id: "suspectedPattern",
+    width: 8,
+    height: 8,
+    patternUnits: "userSpaceOnUse",
+    patternTransform: "rotate(45)"
+  });
+  pattern.appendChild(svgEl("rect", { width: 8, height: 8, fill: "#fff" }));
+  pattern.appendChild(svgEl("rect", { width: 4, height: 8, fill: "#2f3a42" }));
+  defs.appendChild(pattern);
+
+  const marker = svgEl("marker", {
+    id: "arrowHead",
+    markerWidth: 10,
+    markerHeight: 10,
+    refX: 8,
+    refY: 3,
+    orient: "auto",
+    markerUnits: "strokeWidth"
+  });
+  marker.appendChild(svgEl("path", { d: "M0,0 L0,6 L9,3 z", fill: "#b42318" }));
+  defs.appendChild(marker);
+  return defs;
+}
+
+function renderRelationships(graph) {
+  const familyUnits = collectFamilyUnits();
+  const childrenInTwoParentFamilies = new Set(
+    familyUnits.flatMap((unit) => unit.children.map((child) => child.id))
+  );
+  const renderedPartnerKeys = new Set();
+
+  state.project.relationships
+    .filter((rel) => rel.type === "partner")
+    .forEach((rel) => {
+      const p1 = getPerson(rel.person1);
+      const p2 = getPerson(rel.person2);
+      if (!p1 || !p2) return;
+      renderPartnerLine(graph, p1, p2);
+      renderedPartnerKeys.add(parentKey([p1.id, p2.id]));
+    });
+
+  familyUnits.forEach((entry, index) => {
+    const [parentA, parentB] = entry.parents;
+    const key = parentKey([parentA.id, parentB.id]);
+    if (!renderedPartnerKeys.has(key)) {
+      renderPartnerLine(graph, parentA, parentB);
+      renderedPartnerKeys.add(key);
     }
-  });
-
-  parentChildRelations.forEach((relation) => {
-    if (groupedChildIds.has(relation.targetId)) return;
-    renderSingleParentChild(relation);
-  });
-
-  siblingRelations.forEach((relation) => {
-    const hasParentGroup =
-      groupedChildIds.has(relation.sourceId) &&
-      groupedChildIds.has(relation.targetId);
-    if (!hasParentGroup) renderSiblingRelationship(relation);
-  });
-}
-
-function renderPartnerRelationship(relation) {
-  const source = getPerson(relation.sourceId);
-  const target = getPerson(relation.targetId);
-  if (!source || !target) return;
-
-  const line = createSvgElement("line", {
-    x1: source.x,
-    y1: source.y,
-    x2: target.x,
-    y2: target.y,
-    class: `relationship-line partner ${state.selectedRelationshipId === relation.id ? "selected" : ""}`,
-  });
-  bindRelationshipClick(line, relation);
-  relationshipLayer.appendChild(line);
-}
-
-function renderChildGroup(partnerRelation, parentA, parentB, children, parentChildRelations) {
-  const metrics = getNodeMetrics();
-  const midX = (parentA.x + parentB.x) / 2;
-  const parentLineY = (parentA.y + parentB.y) / 2;
-  const childLineY = Math.min(...children.map((child) => child.y)) - metrics.childLineOffset;
-  const minChildX = Math.min(...children.map((child) => child.x));
-  const maxChildX = Math.max(...children.map((child) => child.x));
-
-  const vertical = createSvgElement("line", {
-    x1: midX,
-    y1: parentLineY,
-    x2: midX,
-    y2: childLineY,
-    class: "relationship-guide",
-  });
-  bindRelationshipClick(vertical, partnerRelation);
-  relationshipLayer.appendChild(vertical);
-
-  const childBarStartX = children.length > 1 ? minChildX : Math.min(midX, children[0].x);
-  const childBarEndX = children.length > 1 ? maxChildX : Math.max(midX, children[0].x);
-  if (Math.abs(childBarStartX - childBarEndX) > 1) {
-    relationshipLayer.appendChild(createSvgElement("line", {
-      x1: childBarStartX,
-      y1: childLineY,
-      x2: childBarEndX,
-      y2: childLineY,
-      class: "relationship-guide",
-    }));
-  }
-
-  children.forEach((child) => {
-    const childRelation = parentChildRelations.find(
-      (relation) =>
-        relation.targetId === child.id &&
-        (relation.sourceId === parentA.id || relation.sourceId === parentB.id),
-    );
-    const line = createSvgElement("line", {
-      x1: child.x,
-      y1: childLineY,
-      x2: child.x,
-      y2: child.y - getShapeConnectionOffset(child),
-      class: `relationship-line parentChild ${state.selectedRelationshipId === childRelation?.id ? "selected" : ""}`,
+    const midX = (parentA.x + parentB.x) / 2;
+    const marriageY = (parentA.y + parentB.y) / 2;
+    const childTopY = Math.min(...entry.children.map((child) => child.y)) - LINE_NODE_PADDING;
+    const baseSibshipY = childTopY - FAMILY_TRACK_STEP;
+    const childXs = entry.children.map((child) => child.x);
+    const sibshipY = routeHorizontalLineY(baseSibshipY, Math.min(...childXs), Math.max(...childXs), entry.children, index);
+    const descentX = routeVerticalLineX(midX, marriageY, sibshipY, entry.parents.concat(entry.children), index);
+    graph.appendChild(svgEl("line", { x1: midX, y1: marriageY, x2: descentX, y2: marriageY, class: "descent-line" }));
+    graph.appendChild(svgEl("line", { x1: descentX, y1: marriageY, x2: descentX, y2: sibshipY, class: "descent-line" }));
+    graph.appendChild(svgEl("line", { x1: descentX, y1: sibshipY, x2: midX, y2: sibshipY, class: "descent-line" }));
+    if (entry.children.length > 1) {
+      graph.appendChild(svgEl("line", {
+        x1: Math.min(...childXs),
+        y1: sibshipY,
+        x2: Math.max(...childXs),
+        y2: sibshipY,
+        class: "sibling-line"
+      }));
+    }
+    entry.children.forEach((child) => {
+      graph.appendChild(svgEl("line", { x1: child.x, y1: sibshipY, x2: child.x, y2: child.y - NODE_RADIUS, class: "individual-line" }));
     });
-    if (childRelation) bindRelationshipClick(line, childRelation);
-    relationshipLayer.appendChild(line);
   });
+
+  state.project.relationships
+    .filter((rel) => rel.type === "parentChild")
+    .forEach((rel, index) => {
+      if (childrenInTwoParentFamilies.has(rel.child)) return;
+      const parent = getPerson(rel.parent);
+      const child = getPerson(rel.child);
+      if (!parent || !child) return;
+      const baseDescentY = child.y - LINE_NODE_PADDING;
+      const descentY = routeHorizontalLineY(baseDescentY, Math.min(parent.x, child.x), Math.max(parent.x, child.x), [child], index);
+      const descentX = routeVerticalLineX(parent.x, parent.y, descentY, [parent, child], index);
+      graph.appendChild(svgEl("line", { x1: parent.x, y1: parent.y + NODE_RADIUS, x2: descentX, y2: parent.y + NODE_RADIUS, class: "descent-line" }));
+      graph.appendChild(svgEl("line", { x1: descentX, y1: parent.y + NODE_RADIUS, x2: descentX, y2: descentY, class: "descent-line" }));
+      if (descentX !== child.x) {
+        graph.appendChild(svgEl("line", { x1: descentX, y1: descentY, x2: child.x, y2: descentY, class: "sibling-line" }));
+      }
+      graph.appendChild(svgEl("line", { x1: child.x, y1: descentY, x2: child.x, y2: child.y - NODE_RADIUS, class: "individual-line" }));
+    });
 }
 
-function renderSingleParentChild(relation) {
-  const parent = getPerson(relation.sourceId);
-  const child = getPerson(relation.targetId);
-  if (!parent || !child) return;
-  const metrics = getNodeMetrics();
-  const parentOffset = getShapeConnectionOffset(parent);
-  const childOffset = getShapeConnectionOffset(child);
-  const elbowY = (parent.y + child.y) / 2;
-  const path = createSvgElement("path", {
-    d: `M ${parent.x} ${parent.y + parentOffset} V ${elbowY} H ${child.x} V ${child.y - childOffset}`,
-    class: `relationship-line parentChild ${state.selectedRelationshipId === relation.id ? "selected" : ""}`,
-  });
-  bindRelationshipClick(path, relation);
-  relationshipLayer.appendChild(path);
+function renderPartnerLine(graph, p1, p2) {
+  graph.appendChild(svgEl("line", {
+    x1: p1.x,
+    y1: (p1.y + p2.y) / 2,
+    x2: p2.x,
+    y2: (p1.y + p2.y) / 2,
+    class: "marriage-line"
+  }));
 }
 
-function renderSiblingRelationship(relation) {
-  const source = getPerson(relation.sourceId);
-  const target = getPerson(relation.targetId);
-  if (!source || !target) return;
-  const metrics = getNodeMetrics();
-  const lineY = Math.min(source.y, target.y) - metrics.childLineOffset;
-  const horizontal = createSvgElement("line", {
-    x1: source.x,
-    y1: lineY,
-    x2: target.x,
-    y2: lineY,
-    class: `relationship-line sibling ${state.selectedRelationshipId === relation.id ? "selected" : ""}`,
-  });
-  bindRelationshipClick(horizontal, relation);
-  relationshipLayer.appendChild(horizontal);
-  [source, target].forEach((person) => {
-    relationshipLayer.appendChild(createSvgElement("line", {
-      x1: person.x,
-      y1: lineY,
-      x2: person.x,
-      y2: person.y - getShapeConnectionOffset(person),
-      class: "relationship-guide",
-    }));
-  });
-}
-
-function bindRelationshipClick(element, relation) {
-  element.addEventListener("click", (event) => {
-    event.stopPropagation();
-    selectRelationship(relation.id);
-    updateStatus(`已选中${relationName(relation.type)}关系，可删除`);
-  });
-}
-
-function renderPerson(person) {
-  const metrics = getNodeMetrics();
-  const group = createSvgElement("g", {
-    class: `node-group ${state.selectedPersonId === person.id ? "selected" : ""}`,
-    transform: `translate(${person.x}, ${person.y})`,
-    "data-id": person.id,
-  });
-
-  const ring = createSvgElement("rect", {
-    class: "selection-ring",
-    x: -metrics.selectionWidth / 2,
-    y: -metrics.shapeRadius - 14,
-    width: metrics.selectionWidth,
-    height: metrics.selectionHeight,
-    rx: 8,
-  });
-  group.appendChild(ring);
-
-  group.appendChild(createShape(person));
-
-  if (person.deceased) {
-    group.appendChild(createSvgElement("line", {
-      class: "deceased-line",
-      x1: -metrics.shapeRadius,
-      y1: metrics.shapeRadius,
-      x2: metrics.shapeRadius,
-      y2: -metrics.shapeRadius,
-    }));
+function routeHorizontalLineY(baseY, x1, x2, attachedPeople, trackIndex) {
+  let y = baseY - (trackIndex % 4) * FAMILY_TRACK_STEP;
+  let attempts = 0;
+  while (attempts < 8 && horizontalLineIntersectsAnyNode(x1, x2, y, attachedPeople)) {
+    y -= FAMILY_TRACK_STEP;
+    attempts += 1;
   }
+  return y;
+}
+
+function routeVerticalLineX(baseX, y1, y2, attachedPeople, trackIndex) {
+  let x = baseX;
+  let attempts = 0;
+  while (attempts < 8 && verticalLineIntersectsAnyNode(x, y1, y2, attachedPeople)) {
+    const direction = attempts % 2 === 0 ? 1 : -1;
+    const distance = Math.ceil((attempts + 1) / 2) * FAMILY_TRACK_STEP;
+    x = baseX + direction * distance;
+    attempts += 1;
+  }
+  return x;
+}
+
+function horizontalLineIntersectsAnyNode(x1, x2, y, attachedPeople) {
+  const attachedIds = new Set(attachedPeople.map((person) => person.id));
+  const left = Math.min(x1, x2) - LINE_NODE_PADDING;
+  const right = Math.max(x1, x2) + LINE_NODE_PADDING;
+  return state.project.people.some((person) => {
+    if (attachedIds.has(person.id)) return false;
+    const insideX = person.x > left && person.x < right;
+    const tooCloseY = Math.abs(person.y - y) < LINE_NODE_PADDING;
+    return insideX && tooCloseY;
+  });
+}
+
+function verticalLineIntersectsAnyNode(x, y1, y2, attachedPeople) {
+  const attachedIds = new Set(attachedPeople.map((person) => person.id));
+  const top = Math.min(y1, y2);
+  const bottom = Math.max(y1, y2);
+  return state.project.people.some((person) => {
+    if (attachedIds.has(person.id)) return false;
+    const insideY = person.y > top - LINE_NODE_PADDING && person.y < bottom + LINE_NODE_PADDING;
+    const tooCloseX = Math.abs(person.x - x) < LINE_NODE_PADDING;
+    return insideY && tooCloseX;
+  });
+}
+
+function renderGenerationLabels(graph) {
+  const generations = computeGenerations();
+  const rows = new Map();
+  state.project.people.forEach((person) => {
+    const generation = generations.get(person.id) ?? 0;
+    if (!rows.has(generation)) rows.set(generation, []);
+    rows.get(generation).push(person);
+  });
+  rows.forEach((people, generation) => {
+    const y = average(people.map((person) => person.y));
+    const minX = Math.min(...state.project.people.map((person) => person.x));
+    graph.appendChild(svgEl("text", {
+      x: minX - 92,
+      y,
+      class: "generation-label"
+    }, romanNumeral(generation + 1)));
+  });
+}
+
+function renderPerson(graph, person) {
+  const group = svgEl("g", {
+    class: "node-hit",
+    "data-person-id": person.id,
+    tabindex: "0"
+  });
+  group.addEventListener("pointerdown", (event) => startDrag(event, person.id));
+  group.addEventListener("click", (event) => {
+    event.stopPropagation();
+    selectPerson(person.id);
+  });
 
   if (person.proband) {
-    group.appendChild(createSvgElement("line", {
+    group.appendChild(svgEl("path", {
+      d: `M ${person.x - NODE_SIZE * 1.65} ${person.y + NODE_SIZE * 0.95} L ${person.x - NODE_SIZE * 0.72} ${person.y + NODE_SIZE * 0.38}`,
       class: "proband-arrow",
-      x1: -metrics.shapeRadius - 46,
-      y1: metrics.shapeRadius + 20,
-      x2: -metrics.shapeRadius - 8,
-      y2: metrics.shapeRadius - 8,
+      "marker-end": "url(#arrowHead)"
     }));
   }
 
-  const label = createSvgElement("text", { class: "node-label", x: 0, y: metrics.labelY });
-  label.textContent = person.label;
-  group.appendChild(label);
+  if (state.selectedPersonId === person.id) {
+    group.appendChild(svgEl("circle", {
+      cx: person.x,
+      cy: person.y,
+      r: NODE_RADIUS + NODE_SIZE * 0.28,
+      class: "selected-ring"
+    }));
+  }
 
-  const meta = createSvgElement("text", { class: "node-meta", x: 0, y: metrics.metaY });
-  meta.textContent = buildMeta(person);
-  group.appendChild(meta);
-
-  group.addEventListener("mousedown", startDrag);
-  group.addEventListener("click", handlePersonClick);
-  group.addEventListener("contextmenu", handlePersonContextMenu);
-  nodeLayer.appendChild(group);
-}
-
-function createShape(person) {
-  const fill = getStatusFill(person);
-  const metrics = getNodeMetrics();
+  const className = `person-symbol ${person.affectedStatus || "unknown"}`;
   if (person.sex === "female") {
-    return createSvgElement("circle", {
-      cx: 0,
-      cy: 0,
-      r: metrics.shapeRadius,
-      fill,
-      stroke: "#172033",
-      "stroke-width": 2.5,
-    });
+    group.appendChild(svgEl("circle", { cx: person.x, cy: person.y, r: NODE_RADIUS, class: className }));
+  } else if (person.sex === "male") {
+    group.appendChild(svgEl("rect", {
+      x: person.x - NODE_RADIUS,
+      y: person.y - NODE_RADIUS,
+      width: NODE_SIZE,
+      height: NODE_SIZE,
+      rx: 2,
+      class: className
+    }));
+  } else {
+    const d = `${person.x},${person.y - NODE_RADIUS} ${person.x + NODE_RADIUS},${person.y} ${person.x},${person.y + NODE_RADIUS} ${person.x - NODE_RADIUS},${person.y}`;
+    group.appendChild(svgEl("polygon", { points: d, class: className }));
   }
-  if (person.sex === "unknown") {
-    return createSvgElement("rect", {
-      x: -metrics.diamondHalf,
-      y: -metrics.diamondHalf,
-      width: metrics.diamondHalf * 2,
-      height: metrics.diamondHalf * 2,
-      transform: "rotate(45)",
-      fill,
-      stroke: "#172033",
-      "stroke-width": 2.5,
-    });
+
+  if (person.deceased) {
+    group.appendChild(svgEl("line", {
+      x1: person.x - NODE_RADIUS * 1.15,
+      y1: person.y + NODE_RADIUS * 1.15,
+      x2: person.x + NODE_RADIUS * 1.15,
+      y2: person.y - NODE_RADIUS * 1.15,
+      class: "deceased-line"
+    }));
   }
-  return createSvgElement("rect", {
-    x: -metrics.shapeRadius,
-    y: -metrics.shapeRadius,
-    width: metrics.nodeSize,
-    height: metrics.nodeSize,
-    rx: 2,
-    fill,
-    stroke: "#172033",
-    "stroke-width": 2.5,
-  });
-}
 
-function getNodeMetrics() {
-  const nodeSize = Number(state.layout.nodeSize) || DEFAULT_LAYOUT.nodeSize;
-  const shapeRadius = nodeSize / 2;
-  return {
-    nodeSize,
-    shapeRadius,
-    diamondHalf: nodeSize * 0.38,
-    connectionOffset: shapeRadius,
-    childLineOffset: shapeRadius + 50,
-    labelY: shapeRadius + 28,
-    metaY: shapeRadius + 46,
-    selectionWidth: Math.max(84, nodeSize + 42),
-    selectionHeight: nodeSize + 86,
-  };
-}
+  group.appendChild(svgEl("text", {
+    x: person.x,
+    y: person.y + LABEL_OFFSET,
+    class: "person-label"
+  }, person.name || "未命名"));
 
-function getShapeConnectionOffset(person) {
-  const metrics = getNodeMetrics();
-  if (person.sex === "unknown") {
-    return metrics.diamondHalf * Math.SQRT2;
+  if (person.diagnoses.length > 0) {
+    group.appendChild(svgEl("text", {
+      x: person.x,
+      y: person.y + DIAGNOSIS_OFFSET,
+      class: "diagnosis-label"
+    }, person.diagnoses.slice(0, 2).join("、")));
   }
-  return metrics.shapeRadius;
+
+  graph.appendChild(group);
 }
 
-function getStatusFill(person) {
-  if (person.status === "affected" || person.mental || person.suicide) return "#111827";
-  if (person.status === "carrier") return "#f59e0b";
-  if (person.status === "unknown") return "#dbe3ee";
-  return "#ffffff";
-}
-
-function buildMeta(person) {
-  const parts = [];
-  if (person.age) parts.push(person.age);
-  const clinical = buildClinicalText(person);
-  if (clinical) parts.push(clinical);
-  if (person.onset) parts.push(`发病${person.onset}`);
-  return parts.join(" / ");
-}
-
-function buildClinicalText(person) {
-  const tags = [];
-  if (person.disease) tags.push(person.disease);
-  if (person.mental) tags.push("精神障碍");
-  if (person.suicide) tags.push("自杀史");
-  if (person.substance) tags.push("物质使用");
-  return tags.slice(0, 3).join("、");
-}
-
-function relationName(type) {
-  return {
-    partner: "配偶",
-    parentChild: "亲子",
-    sibling: "同胞",
-  }[type];
-}
-
-function refreshKinshipLabels() {
-  const proband = state.people.find((person) => person.proband);
-  if (!proband) return;
-  const connectedIds = getConnectedPersonIds(proband.id);
-  const graph = buildKinshipGraph();
-  const labels = new Map();
-  labels.set(proband.id, "先证者");
-
-  const probandParents = graph.parentsOf(proband.id);
-  const probandChildren = graph.childrenOf(proband.id);
-  const probandSiblings = graph.siblingsOf(proband.id);
-  const probandPartners = graph.partnersOf(proband.id);
-
-  probandParents.forEach((parent) => {
-    labels.set(parent.id, parent.sex === "female" ? "母亲" : "父亲");
+function svgEl(tag, attrs = {}, text) {
+  const node = document.createElementNS(SVG_NS, tag);
+  Object.entries(attrs).forEach(([key, value]) => {
+    node.setAttribute(key, String(value));
   });
+  if (text !== undefined) {
+    node.textContent = text;
+  }
+  return node;
+}
 
-  probandPartners.forEach((partner) => {
-    labels.set(partner.id, partner.sex === "male" ? "丈夫" : partner.sex === "female" ? "妻子" : "配偶");
-  });
+function getPerson(id) {
+  return state.project.people.find((person) => person.id === id) || null;
+}
 
-  probandChildren.forEach((child) => {
-    labels.set(child.id, child.sex === "female" ? "女儿" : child.sex === "male" ? "儿子" : "子女");
-  });
+function findParents(personId) {
+  return state.project.relationships
+    .filter((rel) => rel.type === "parentChild" && rel.child === personId)
+    .map((rel) => getPerson(rel.parent))
+    .filter(Boolean);
+}
 
-  labelSiblings(labels, proband, probandSiblings);
-  labelGrandparents(labels, graph, probandParents);
-  labelAuntsUnclesAndCousins(labels, graph, proband, probandParents);
-  labelNiecesAndNephews(labels, graph, probandSiblings);
-  labelInLaws(labels, graph, proband, probandSiblings);
+function findPartners(personId) {
+  return state.project.relationships
+    .filter((rel) => rel.type === "partner" && (rel.person1 === personId || rel.person2 === personId))
+    .map((rel) => getPerson(rel.person1 === personId ? rel.person2 : rel.person1))
+    .filter(Boolean);
+}
 
-  state.people.forEach((person) => {
-    if (!connectedIds.has(person.id)) {
-      if (isKinshipAutoLabel(person.label)) person.label = "";
-      return;
+function collectFamilyUnits() {
+  const grouped = new Map();
+  state.project.people.forEach((child) => {
+    const parents = findParents(child.id).sort(compareProjectOrder);
+    if (parents.length < 2) return;
+    const primaryParents = choosePrimaryParents(parents);
+    const key = parentKey(primaryParents.map((parent) => parent.id));
+    if (!grouped.has(key)) {
+      grouped.set(key, { parents: primaryParents, children: [] });
     }
-    const label = labels.get(person.id);
-    if (label) {
-      person.label = label;
-    } else if (isKinshipAutoLabel(person.label)) {
-      person.label = "";
-    }
+    grouped.get(key).children.push(child);
   });
-  fillInspector();
+  return [...grouped.values()].map((unit) => ({
+    parents: orderPartnerPeople(unit.parents[0], unit.parents[1]),
+    children: unit.children.sort(compareLayoutOrder)
+  }));
 }
 
-function getConnectedPersonIds(startId) {
-  const seen = new Set([startId]);
-  const queue = [startId];
-  while (queue.length) {
-    const current = queue.shift();
-    state.relationships.forEach((relation) => {
-      let next = null;
-      if (relation.sourceId === current) next = relation.targetId;
-      if (relation.targetId === current) next = relation.sourceId;
-      if (next && !seen.has(next)) {
-        seen.add(next);
-        queue.push(next);
-      }
-    });
+function choosePrimaryParents(parents) {
+  const male = parents.find((parent) => parent.sex === "male");
+  const female = parents.find((parent) => parent.sex === "female");
+  if (male && female) return [male, female];
+  return parents.slice(0, 2);
+}
+
+function parentKey(ids) {
+  return [...ids].sort().join("|");
+}
+
+function orderPartnerPeople(personA, personB) {
+  return orderPartnerIds(personA.id, personB.id).map((id) => getPerson(id)).filter(Boolean);
+}
+
+function orderPartnerIds(idA, idB) {
+  const personA = getPerson(idA);
+  const personB = getPerson(idB);
+  if (personA?.sex === "male" && personB?.sex !== "male") return [idA, idB];
+  if (personB?.sex === "male" && personA?.sex !== "male") return [idB, idA];
+  if (personA?.sex !== "female" && personB?.sex === "female") return [idA, idB];
+  if (personB?.sex !== "female" && personA?.sex === "female") return [idB, idA];
+  return [idA, idB].sort((a, b) => projectOrder(a) - projectOrder(b));
+}
+
+function compareProjectOrder(a, b) {
+  return projectOrder(a.id) - projectOrder(b.id);
+}
+
+function compareLayoutOrder(a, b) {
+  const orderA = Number.isFinite(a.layoutOrder) ? a.layoutOrder : projectOrder(a.id);
+  const orderB = Number.isFinite(b.layoutOrder) ? b.layoutOrder : projectOrder(b.id);
+  if (orderA !== orderB) return orderA - orderB;
+  return projectOrder(a.id) - projectOrder(b.id);
+}
+
+function projectOrder(id) {
+  return state.project.people.findIndex((person) => person.id === id);
+}
+
+function selectPerson(id) {
+  state.selectedPersonId = id;
+  updateControls();
+  renderAll();
+}
+
+function autoLayout(resetManual) {
+  if (state.project.people.length === 0) return;
+  if (resetManual) {
+    clearManualPositions();
   }
-  return seen;
-}
-
-function isKinshipAutoLabel(label) {
-  if (!label) return false;
-  const exact = new Set([
-    "先证者", "父亲", "母亲", "祖父", "祖母", "外祖父", "外祖母",
-    "丈夫", "妻子", "配偶", "儿子", "女儿", "弟弟", "妹妹",
-    "年长同胞", "年幼同胞", "伯父", "叔叔", "姑姑", "舅舅", "姨妈",
-    "堂亲", "表亲", "侄子", "侄女", "外甥", "外甥女", "嫂子", "弟媳", "姐夫", "妹夫",
-  ]);
-  if (exact.has(label)) return true;
-  return /^[大二三四五六七八九十0-9]+[哥姐]$/.test(label) ||
-    /^堂[兄弟姐妹]$/.test(label) ||
-    /^表[兄弟姐妹]$/.test(label);
-}
-
-function buildKinshipGraph() {
-  const parentChild = state.relationships.filter((relation) => relation.type === "parentChild");
-  const partner = state.relationships.filter((relation) => relation.type === "partner");
-  const explicitSibling = state.relationships.filter((relation) => relation.type === "sibling");
-  return {
-    parentsOf(personId) {
-      return parentChild
-        .filter((relation) => relation.targetId === personId)
-        .map((relation) => getPerson(relation.sourceId))
-        .filter(Boolean);
-    },
-    childrenOf(personId) {
-      return parentChild
-        .filter((relation) => relation.sourceId === personId)
-        .map((relation) => getPerson(relation.targetId))
-        .filter(Boolean);
-    },
-    partnersOf(personId) {
-      return partner
-        .filter((relation) => relation.sourceId === personId || relation.targetId === personId)
-        .map((relation) => getPerson(relation.sourceId === personId ? relation.targetId : relation.sourceId))
-        .filter(Boolean);
-    },
-    siblingsOf(personId) {
-      const siblingIds = new Set();
-      explicitSibling.forEach((relation) => {
-        if (relation.sourceId === personId) siblingIds.add(relation.targetId);
-        if (relation.targetId === personId) siblingIds.add(relation.sourceId);
-      });
-      const parentIds = parentChild
-        .filter((relation) => relation.targetId === personId)
-        .map((relation) => relation.sourceId);
-      parentIds.forEach((parentId) => {
-        parentChild
-          .filter((relation) => relation.sourceId === parentId && relation.targetId !== personId)
-          .forEach((relation) => siblingIds.add(relation.targetId));
-      });
-      return Array.from(siblingIds).map(getPerson).filter(Boolean);
-    },
-  };
-}
-
-function labelSiblings(labels, proband, siblings) {
-  const olderBrothers = siblings
-    .filter((person) => person.sex === "male" && person.x < proband.x)
-    .sort((a, b) => a.x - b.x);
-  const olderSisters = siblings
-    .filter((person) => person.sex === "female" && person.x < proband.x)
-    .sort((a, b) => a.x - b.x);
-  const youngerBrothers = siblings
-    .filter((person) => person.sex === "male" && person.x >= proband.x)
-    .sort((a, b) => a.x - b.x);
-  const youngerSisters = siblings
-    .filter((person) => person.sex === "female" && person.x >= proband.x)
-    .sort((a, b) => a.x - b.x);
-  siblings.forEach((sibling) => {
-    if (sibling.x < proband.x) {
-      if (sibling.sex === "male") {
-        labels.set(sibling.id, olderRankLabel(olderBrothers, sibling.id, "哥"));
-      } else if (sibling.sex === "female") {
-        labels.set(sibling.id, olderRankLabel(olderSisters, sibling.id, "姐"));
-      } else {
-        labels.set(sibling.id, "年长同胞");
-      }
-    } else if (sibling.sex === "male") {
-      labels.set(sibling.id, youngerRankLabel(youngerBrothers, sibling.id, "弟"));
-    } else if (sibling.sex === "female") {
-      labels.set(sibling.id, youngerRankLabel(youngerSisters, sibling.id, "妹"));
-    } else {
-      labels.set(sibling.id, "年幼同胞");
-    }
-  });
-}
-
-function olderRankLabel(group, personId, suffix) {
-  const index = group.findIndex((person) => person.id === personId);
-  if (index === 0) return `大${suffix}`;
-  if (index === 1) return `二${suffix}`;
-  if (index === 2) return `三${suffix}`;
-  return `${index + 1}${suffix}`;
-}
-
-function youngerRankLabel(group, personId, suffix) {
-  if (group.length === 1) return suffix === "弟" ? "弟弟" : "妹妹";
-  const index = group.findIndex((person) => person.id === personId);
-  if (index === 0) return `大${suffix}`;
-  if (index === 1) return `二${suffix}`;
-  if (index === 2) return `三${suffix}`;
-  return `${index + 1}${suffix}`;
-}
-
-function labelGrandparents(labels, graph, probandParents) {
-  probandParents.forEach((parent) => {
-    graph.parentsOf(parent.id).forEach((grandparent) => {
-      if (parent.sex === "female") {
-        labels.set(grandparent.id, grandparent.sex === "female" ? "外祖母" : "外祖父");
-      } else {
-        labels.set(grandparent.id, grandparent.sex === "female" ? "祖母" : "祖父");
-      }
-    });
-  });
-}
-
-function labelAuntsUnclesAndCousins(labels, graph, proband, probandParents) {
-  probandParents.forEach((parent) => {
-    const parentSiblings = graph.siblingsOf(parent.id);
-    parentSiblings.forEach((relative) => {
-      const side = parent.sex === "female" ? "maternal" : "paternal";
-      const isOlderThanParent = relative.x < parent.x;
-      let relativeLabel = "";
-      if (side === "paternal") {
-        if (relative.sex === "male") relativeLabel = isOlderThanParent ? "伯父" : "叔叔";
-        if (relative.sex === "female") relativeLabel = "姑姑";
-      } else {
-        if (relative.sex === "male") relativeLabel = "舅舅";
-        if (relative.sex === "female") relativeLabel = "姨妈";
-      }
-      if (relativeLabel) labels.set(relative.id, relativeLabel);
-      const cousinPrefix = side === "paternal" && relative.sex === "male" ? "堂" : "表";
-      graph.childrenOf(relative.id).forEach((cousin) => {
-        labels.set(cousin.id, cousinLabel(cousinPrefix, cousin, proband));
-      });
-    });
-  });
-}
-
-function cousinLabel(prefix, cousin, proband) {
-  const older = cousin.x < proband.x;
-  if (cousin.sex === "male") return `${prefix}${older ? "兄" : "弟"}`;
-  if (cousin.sex === "female") return `${prefix}${older ? "姐" : "妹"}`;
-  return `${prefix}亲`;
-}
-
-function labelNiecesAndNephews(labels, graph, probandSiblings) {
-  probandSiblings.forEach((sibling) => {
-    graph.childrenOf(sibling.id).forEach((child) => {
-      if (child.sex === "male") labels.set(child.id, sibling.sex === "male" ? "侄子" : "外甥");
-      if (child.sex === "female") labels.set(child.id, sibling.sex === "male" ? "侄女" : "外甥女");
-    });
-  });
-}
-
-function labelInLaws(labels, graph, proband, probandSiblings) {
-  probandSiblings.forEach((sibling) => {
-    graph.partnersOf(sibling.id).forEach((partner) => {
-      if (labels.has(partner.id)) return;
-      if (sibling.x < proband.x) {
-        labels.set(partner.id, sibling.sex === "male" ? "嫂子" : "姐夫");
-      } else {
-        labels.set(partner.id, sibling.sex === "male" ? "弟媳" : "妹夫");
-      }
-    });
-  });
-}
-
-let dragState = null;
-
-function startDrag(event) {
-  if (event.button !== 0) return;
-  if (state.connectMode) return;
-  hideContextMenu();
-  event.preventDefault();
-  const group = event.currentTarget;
-  const person = getPerson(group.dataset.id);
-  const point = getMousePosition(event);
-  dragState = {
-    id: person.id,
-    moved: false,
-    startX: point.x,
-    startY: point.y,
-    dx: point.x - person.x,
-    dy: point.y - person.y,
-  };
-  selectPerson(person.id);
-  window.addEventListener("mousemove", dragPerson);
-  window.addEventListener("mouseup", stopDrag);
-}
-
-function dragPerson(event) {
-  if (!dragState) return;
-  const person = getPerson(dragState.id);
-  const point = getMousePosition(event);
-  const distance = Math.hypot(point.x - dragState.startX, point.y - dragState.startY);
-  if (!dragState.moved && distance < 4) return;
-  dragState.moved = true;
-  const proposedY = point.y - dragState.dy;
-  person.generation = generationFromY(proposedY);
-  person.x = snapX(point.x - dragState.dx);
-  person.y = generationY(person.generation);
-  render();
-}
-
-function stopDrag() {
-  if (!dragState) return;
-  const moved = dragState.moved;
-  const id = dragState.id;
-  dragState = null;
-  if (moved) {
-    normalizeSiblingSpacing(id);
-    resolveLayoutConflicts();
-    enforcePedigreeLineRules();
-    refreshKinshipLabels();
-    saveState();
-    render();
-  }
-  window.removeEventListener("mousemove", dragPerson);
-  window.removeEventListener("mouseup", stopDrag);
-}
-
-function handlePersonClick(event) {
-  event.stopPropagation();
-  hideContextMenu();
-  const id = event.currentTarget.dataset.id;
-  if (!state.connectMode) {
-    selectPerson(id);
-    updateStatus("已选中人员，可在右侧编辑");
-    return;
-  }
-  if (!state.pendingConnectionId) {
-    state.pendingConnectionId = id;
-    selectPerson(id);
-    updateStatus("请选择第二个人完成连线");
-    return;
-  }
-  if (state.pendingConnectionId === id) {
-    updateStatus("请选择另一个人完成连线");
-    return;
-  }
-  addRelationship(state.pendingConnectionId, id);
-}
-
-function handlePersonContextMenu(event) {
-  event.preventDefault();
-  event.stopPropagation();
-  const id = event.currentTarget.dataset.id;
-  selectPerson(id);
-  openContextMenu(id, event.clientX, event.clientY);
-}
-
-function openContextMenu(personId, clientX, clientY) {
-  contextMenuPersonId = personId;
-  closeRelativeSubmenu();
-  nodeContextMenu.hidden = false;
-  const menuWidth = nodeContextMenu.offsetWidth || 150;
-  const menuHeight = nodeContextMenu.offsetHeight || 120;
-  const left = Math.min(clientX, window.innerWidth - menuWidth - 12);
-  const top = Math.min(clientY, window.innerHeight - menuHeight - 12);
-  nodeContextMenu.style.left = `${Math.max(8, left)}px`;
-  nodeContextMenu.style.top = `${Math.max(8, top)}px`;
-}
-
-function hideContextMenu() {
-  nodeContextMenu.hidden = true;
-  contextMenuPersonId = null;
-  closeRelativeSubmenu();
-}
-
-function openRelativeSubmenu() {
-  clearTimeout(submenuCloseTimer);
-  nodeContextMenu.querySelector(".context-submenu")?.classList.add("open");
-}
-
-function scheduleCloseRelativeSubmenu() {
-  clearTimeout(submenuCloseTimer);
-  submenuCloseTimer = setTimeout(() => {
-    closeRelativeSubmenu();
-  }, 450);
-}
-
-function closeRelativeSubmenu() {
-  clearTimeout(submenuCloseTimer);
-  nodeContextMenu.querySelector(".context-submenu")?.classList.remove("open");
-}
-
-function deleteSelected() {
-  if (state.selectedPersonId) {
-    const id = state.selectedPersonId;
-    state.people = state.people.filter((person) => person.id !== id);
-    state.relationships = state.relationships.filter(
-      (relation) => relation.sourceId !== id && relation.targetId !== id,
-    );
-    state.selectedPersonId = null;
-    fillInspector();
-    updateStatus("已删除人员");
-  } else if (state.selectedRelationshipId) {
-    state.relationships = state.relationships.filter((relation) => relation.id !== state.selectedRelationshipId);
-    state.selectedRelationshipId = null;
-    updateStatus("已删除关系线");
-  }
-  refreshKinshipLabels();
-  saveState();
-  render();
-}
-
-function updateConnectButton() {
-  const button = document.getElementById("connectModeButton");
-  button.classList.toggle("active", state.connectMode);
-  button.textContent = state.connectMode ? "取消连接" : "连接两人";
-}
-
-function addTemplate() {
-  state.people = [];
-  state.relationships = [];
-  state.nextPersonNumber = 1;
-  const template = [
-    ["male", 520, 160, { label: "祖父", generation: 0 }],
-    ["female", 700, 160, { label: "祖母", generation: 0 }],
-    ["male", 520, 360, { label: "父亲", generation: 1 }],
-    ["female", 700, 360, { label: "母亲", generation: 1 }],
-    ["male", 520, 560, { label: "先证者", generation: 2, proband: true, status: "affected", disease: "目标疾病" }],
-    ["female", 700, 560, { label: "姐妹", generation: 2 }],
-    ["unknown", 880, 560, { label: "同胞", generation: 2 }],
-  ];
-  template.forEach(([sex, x, y, fields]) => addPerson(sex, x, y, fields));
-  const [gf, gm, father, mother, proband, sister, sibling] = state.people;
-  state.relationships.push(
-    { id: crypto.randomUUID(), sourceId: gf.id, targetId: gm.id, type: "partner" },
-    { id: crypto.randomUUID(), sourceId: gf.id, targetId: father.id, type: "parentChild" },
-    { id: crypto.randomUUID(), sourceId: gm.id, targetId: father.id, type: "parentChild" },
-    { id: crypto.randomUUID(), sourceId: father.id, targetId: mother.id, type: "partner" },
-    { id: crypto.randomUUID(), sourceId: father.id, targetId: proband.id, type: "parentChild" },
-    { id: crypto.randomUUID(), sourceId: mother.id, targetId: proband.id, type: "parentChild" },
-    { id: crypto.randomUUID(), sourceId: proband.id, targetId: sister.id, type: "sibling" },
-    { id: crypto.randomUUID(), sourceId: proband.id, targetId: sibling.id, type: "sibling" },
-  );
-  selectPerson(proband.id);
-  saveState();
-  render();
-  updateStatus("已生成三代示例，可继续拖拽调整");
-}
-
-function autoLayout() {
-  if (!state.people.length) return;
-
-  const proband = state.people.find((person) => person.proband) || state.people[0];
-  const connectedIds = getConnectedPersonIds(proband.id);
-  const generation = new Map(state.people.map((person) => [person.id, person.generation ?? 2]));
-  const parentChildRelations = state.relationships.filter((relation) => relation.type === "parentChild");
-  const partnerRelations = state.relationships.filter((relation) => relation.type === "partner");
-  const siblingRelations = state.relationships.filter((relation) => relation.type === "sibling");
-  generation.set(proband.id, 2);
-
-  for (let pass = 0; pass < state.people.length + 2; pass += 1) {
-    let changed = false;
-    parentChildRelations.forEach((relation) => {
-      const childGen = generation.get(relation.targetId) ?? 2;
-      const parentGen = generation.get(relation.sourceId) ?? 2;
-      if (parentGen !== childGen - 1) {
-        generation.set(relation.sourceId, childGen - 1);
-        changed = true;
-      }
-    });
-    partnerRelations.forEach((relation) => {
-      const a = generation.get(relation.sourceId) ?? 0;
-      const b = generation.get(relation.targetId) ?? 0;
-      const same = Math.min(a, b);
-      if (a !== same) {
-        generation.set(relation.sourceId, same);
-        changed = true;
-      }
-      if (b !== same) {
-        generation.set(relation.targetId, same);
-        changed = true;
-      }
-    });
-    siblingRelations.forEach((relation) => {
-      const a = generation.get(relation.sourceId) ?? 0;
-      const b = generation.get(relation.targetId) ?? 0;
-      const same = Math.max(a, b);
-      if (a !== same) {
-        generation.set(relation.sourceId, same);
-        changed = true;
-      }
-      if (b !== same) {
-        generation.set(relation.targetId, same);
-        changed = true;
-      }
-    });
-    if (!changed) break;
-  }
-
-  const rows = new Map();
-  state.people.filter((person) => connectedIds.has(person.id)).forEach((person) => {
-    const row = clampGeneration(generation.get(person.id) ?? person.generation ?? 2);
-    person.generation = row;
-    person.y = generationY(row);
-    if (!rows.has(row)) rows.set(row, []);
-    rows.get(row).push(person);
+  const generations = computeGenerations();
+  const grouped = new Map();
+  state.project.people.forEach((person) => {
+    const generation = generations.get(person.id) ?? 0;
+    if (!grouped.has(generation)) grouped.set(generation, []);
+    grouped.get(generation).push(person);
   });
 
-  rows.forEach((people, row) => {
-    people.sort((a, b) => {
-      if (a.proband) return -1;
-      if (b.proband) return 1;
-      return a.x - b.x || a.label.localeCompare(b.label, "zh-CN");
-    });
-    const spacing = state.layout.layoutSpacing;
-    const totalWidth = (people.length - 1) * spacing;
-    const startX = Math.max(220, 760 - totalWidth / 2);
+  const sortedGenerations = [...grouped.keys()].sort((a, b) => a - b);
+  const centerX = CANVAS_CENTER_X;
+  sortedGenerations.forEach((generation, generationIndex) => {
+    const people = grouped.get(generation);
+    people.sort(compareLayoutOrder);
+    const startX = centerX - ((people.length - 1) * PERSON_GAP) / 2;
     people.forEach((person, index) => {
-      person.x = snapX(startX + index * spacing);
-      person.y = generationY(row);
+      if (!resetManual && person.manualPosition) return;
+      person.x = startX + index * PERSON_GAP;
+      person.y = FIRST_GENERATION_Y + generationIndex * GENERATION_GAP;
     });
   });
 
-  layoutFamilyGroups();
-  resolveLayoutConflicts();
-  enforcePedigreeLineRules();
-  placeDisconnectedNodes(connectedIds);
-  refreshKinshipLabels();
-  centerDiagramOnCanvas();
-  saveState();
-  render();
-  scrollDiagramIntoView();
-  updateStatus("已按世代整理布局");
-}
-
-function placeDisconnectedNodes(connectedIds) {
-  const disconnected = state.people.filter((person) => !connectedIds.has(person.id));
-  if (!disconnected.length) return;
-  disconnected
-    .sort((a, b) => (a.generation ?? 0) - (b.generation ?? 0) || a.x - b.x)
-    .forEach((person, index) => {
-      person.x = alignX(CANVAS_WIDTH - 360);
-      person.y = generationY(Math.min(index, GENERATIONS.length - 1));
-    });
-}
-
-function layoutFamilyGroups() {
-  normalizeSiblingSpacing();
-  placeSpousesAroundCoreMembers();
-  centerChildrenUnderParents();
-  normalizeSiblingSpacing();
-  placeSpousesAroundCoreMembers();
-  centerChildrenUnderParents();
-  resolveGenerationCollisions();
-}
-
-function enforcePedigreeLineRules() {
-  placeSpousesAroundCoreMembers();
-  centerChildrenUnderParents();
-  normalizeSiblingSpacing();
-  centerChildrenUnderParents();
-}
-
-function resolveLayoutConflicts() {
   for (let pass = 0; pass < 4; pass += 1) {
-    const movedNodes = resolveNodeOverlaps();
-    const movedLines = resolveLineNodeConflicts();
-    if (!movedNodes && !movedLines) break;
-    centerChildrenUnderParents();
+    alignPartnerPairs(resetManual);
+    alignFamilyUnits(resetManual);
+    alignSingleParentChildren(resetManual);
+    avoidNodeCollisionsByGeneration();
   }
+  avoidNodeCollisionsByGeneration();
 }
 
-function resolveNodeOverlaps() {
-  const metrics = getNodeMetrics();
-  const minGap = metrics.nodeSize + 34;
-  let moved = false;
-  const rows = groupPeopleByGeneration();
-  rows.forEach((people) => {
-    people.sort((a, b) => a.x - b.x);
-    for (let index = 1; index < people.length; index += 1) {
-      const previous = people[index - 1];
-      const current = people[index];
-      if (current.x - previous.x < minGap) {
-        current.x = alignX(previous.x + minGap);
-        moved = true;
+function alignPartnerPairs(resetManual) {
+  state.project.relationships
+    .filter((rel) => rel.type === "partner")
+    .forEach((rel) => {
+      const [leftId, rightId] = orderPartnerIds(rel.person1, rel.person2);
+      const left = getPerson(leftId);
+      const right = getPerson(rightId);
+      if (!left || !right) return;
+      const centerX = (left.x + right.x) / 2;
+      const centerY = (left.y + right.y) / 2;
+      if (resetManual || !left.manualPosition) {
+        left.x = centerX - PERSON_GAP / 2;
+        left.y = centerY;
       }
-    }
-  });
-  return moved;
-}
-
-function resolveLineNodeConflicts() {
-  let moved = false;
-  const metrics = getNodeMetrics();
-  const nodeRadius = metrics.shapeRadius + 18;
-  const relationships = state.relationships.slice();
-  relationships.forEach((relation) => {
-    const source = getPerson(relation.sourceId);
-    const target = getPerson(relation.targetId);
-    if (!source || !target) return;
-    if (relation.type === "partner") {
-      const minX = Math.min(source.x, target.x);
-      const maxX = Math.max(source.x, target.x);
-      state.people.forEach((person) => {
-        if (person.id === source.id || person.id === target.id) return;
-        if ((person.generation ?? generationFromY(person.y)) !== (source.generation ?? generationFromY(source.y))) return;
-        if (person.x > minX + nodeRadius && person.x < maxX - nodeRadius) {
-          person.x = alignX(maxX + nodeRadius + state.layout.siblingSpacing / 2);
-          moved = true;
-        }
-      });
-    }
-    if (relation.type === "parentChild") {
-      const minY = Math.min(source.y, target.y);
-      const maxY = Math.max(source.y, target.y);
-      state.people.forEach((person) => {
-        if (person.id === source.id || person.id === target.id) return;
-        const sameVertical = Math.abs(person.x - target.x) < nodeRadius;
-        const betweenGenerations = person.y > minY + nodeRadius && person.y < maxY - nodeRadius;
-        if (sameVertical && betweenGenerations) {
-          person.x = alignX(person.x + state.layout.siblingSpacing);
-          moved = true;
-        }
-      });
-    }
-  });
-  if (moved) resolveNodeOverlaps();
-  return moved;
-}
-
-function groupPeopleByGeneration() {
-  const rows = new Map();
-  state.people.forEach((person) => {
-    const row = person.generation ?? generationFromY(person.y);
-    if (!rows.has(row)) rows.set(row, []);
-    rows.get(row).push(person);
-  });
-  return rows;
-}
-
-function getDiagramBounds() {
-  if (!state.people.length) return null;
-  const metrics = getNodeMetrics();
-  const paddingX = metrics.selectionWidth / 2 + 30;
-  const paddingTop = metrics.shapeRadius + 40;
-  const paddingBottom = metrics.selectionHeight - metrics.shapeRadius + 30;
-  return state.people.reduce((bounds, person) => {
-    bounds.minX = Math.min(bounds.minX, person.x - paddingX);
-    bounds.maxX = Math.max(bounds.maxX, person.x + paddingX);
-    bounds.minY = Math.min(bounds.minY, person.y - paddingTop);
-    bounds.maxY = Math.max(bounds.maxY, person.y + paddingBottom);
-    return bounds;
-  }, {
-    minX: Infinity,
-    maxX: -Infinity,
-    minY: Infinity,
-    maxY: -Infinity,
-  });
-}
-
-function centerDiagramOnCanvas() {
-  const bounds = getDiagramBounds();
-  if (!bounds) return;
-  const desiredCenterX = CANVAS_WIDTH / 2;
-  const currentCenterX = (bounds.minX + bounds.maxX) / 2;
-  const shiftX = desiredCenterX - currentCenterX;
-  state.people.forEach((person) => {
-    person.x = alignX(person.x + shiftX);
-  });
-  const shiftedBounds = getDiagramBounds();
-  if (!shiftedBounds) return;
-  let correctionX = 0;
-  if (shiftedBounds.minX < 40) correctionX = 40 - shiftedBounds.minX;
-  if (shiftedBounds.maxX > CANVAS_WIDTH - 40) correctionX = CANVAS_WIDTH - 40 - shiftedBounds.maxX;
-  if (correctionX) {
-    state.people.forEach((person) => {
-      person.x = alignX(person.x + correctionX);
+      if (resetManual || !right.manualPosition) {
+        right.x = centerX + PERSON_GAP / 2;
+        right.y = centerY;
+      }
     });
-  }
 }
 
-function scrollDiagramIntoView() {
-  const bounds = getDiagramBounds();
-  if (!bounds) return;
-  requestAnimationFrame(() => {
-    const viewportWidth = canvasWrap.clientWidth;
-    const viewportHeight = canvasWrap.clientHeight;
-    canvasWrap.scrollLeft = Math.max(0, (bounds.minX + bounds.maxX) / 2 - viewportWidth / 2);
-    canvasWrap.scrollTop = Math.max(0, (bounds.minY + bounds.maxY) / 2 - viewportHeight / 2);
-  });
-}
+function alignFamilyUnits(resetManual) {
+  collectFamilyUnits().forEach((unit) => {
+    const [leftParent, rightParent] = unit.parents;
+    const children = unit.children;
+    if (!leftParent || !rightParent || children.length === 0) return;
 
-function placeSpousesAroundCoreMembers() {
-  const partnerRelations = state.relationships.filter((relation) => relation.type === "partner");
-  const childIds = new Set(
-    state.relationships
-      .filter((relation) => relation.type === "parentChild")
-      .map((relation) => relation.targetId),
-  );
-  partnerRelations.forEach((relation) => {
-    const first = getPerson(relation.sourceId);
-    const second = getPerson(relation.targetId);
-    if (!first || !second) return;
-    const partnerGap = Math.max(state.layout.siblingSpacing, state.layout.nodeSize * 2 + 60);
-    const core = chooseCorePartner(first, second, childIds);
-    const spouse = core.id === first.id ? second : first;
-    const coreIsFemale = core.sex === "female" && spouse.sex !== "female";
-    spouse.x = alignX(core.x + (coreIsFemale ? -partnerGap : partnerGap));
-    const generation = Math.min(
-      core.generation ?? generationFromY(core.y),
-      spouse.generation ?? generationFromY(spouse.y),
-    );
-    core.generation = generation;
-    spouse.generation = generation;
-    core.y = generationY(generation);
-    spouse.y = generationY(generation);
-  });
-}
+    const parentCenter = (leftParent.x + rightParent.x) / 2;
+    const centerX = parentCenter;
+    const parentY = Math.min(leftParent.y, rightParent.y);
+    const childY = parentY + GENERATION_GAP;
+    const childStartX = centerX - ((children.length - 1) * PERSON_GAP) / 2;
 
-function chooseCorePartner(first, second, childIds) {
-  const firstScore = getPedigreeCoreScore(first.id, childIds);
-  const secondScore = getPedigreeCoreScore(second.id, childIds);
-  if (firstScore !== secondScore) return firstScore > secondScore ? first : second;
-  const firstIsChild = childIds.has(first.id);
-  const secondIsChild = childIds.has(second.id);
-  if (firstIsChild && !secondIsChild) return first;
-  if (secondIsChild && !firstIsChild) return second;
-  const firstSiblingDegree = getSiblingDegree(first.id);
-  const secondSiblingDegree = getSiblingDegree(second.id);
-  if (firstSiblingDegree !== secondSiblingDegree) {
-    return firstSiblingDegree > secondSiblingDegree ? first : second;
-  }
-  if (first.proband && !second.proband) return first;
-  if (second.proband && !first.proband) return second;
-  return first;
-}
-
-function getPedigreeCoreScore(personId, childIds) {
-  let score = 0;
-  if (childIds.has(personId)) score += 4;
-  score += getParentCount(personId) * 3;
-  score += getSiblingDegree(personId) * 2;
-  const person = getPerson(personId);
-  if (person?.proband) score += 5;
-  return score;
-}
-
-function getParentCount(personId) {
-  return state.relationships.filter(
-    (relation) => relation.type === "parentChild" && relation.targetId === personId,
-  ).length;
-}
-
-function getSiblingDegree(personId) {
-  return state.relationships.filter(
-    (relation) => relation.type === "sibling" && (relation.sourceId === personId || relation.targetId === personId),
-  ).length;
-}
-
-function centerChildrenUnderParents() {
-  const partnerRelations = state.relationships.filter((relation) => relation.type === "partner");
-  const parentChildRelations = state.relationships.filter((relation) => relation.type === "parentChild");
-  partnerRelations.forEach((relation) => {
-    const parentA = getPerson(relation.sourceId);
-    const parentB = getPerson(relation.targetId);
-    if (!parentA || !parentB) return;
-    const children = parentChildRelations
-      .filter((candidate) => candidate.sourceId === parentA.id || candidate.sourceId === parentB.id)
-      .map((candidate) => candidate.targetId)
-      .filter((childId, index, ids) => ids.indexOf(childId) === index)
-      .map(getPerson)
-      .filter(Boolean)
-      .filter((child) => !isSpouseOnlyInGeneration(child.id))
-      .sort((a, b) => a.x - b.x);
-    if (!children.length) return;
-    const midX = (parentA.x + parentB.x) / 2;
-    const spacing = state.layout.siblingSpacing;
-    const startX = midX - ((children.length - 1) * spacing) / 2;
+    if (resetManual || !leftParent.manualPosition) {
+      leftParent.x = centerX - PERSON_GAP / 2;
+      leftParent.y = parentY;
+    }
+    if (resetManual || !rightParent.manualPosition) {
+      rightParent.x = centerX + PERSON_GAP / 2;
+      rightParent.y = parentY;
+    }
     children.forEach((child, index) => {
-      child.x = alignX(startX + index * spacing);
-    });
-  });
-}
-
-function isSpouseOnlyInGeneration(personId) {
-  const hasParent = state.relationships.some(
-    (relation) => relation.type === "parentChild" && relation.targetId === personId,
-  );
-  const hasSibling = state.relationships.some(
-    (relation) => relation.type === "sibling" && (relation.sourceId === personId || relation.targetId === personId),
-  );
-  return !hasParent && !hasSibling;
-}
-
-function resolveGenerationCollisions() {
-  const minGap = Math.max(state.layout.nodeSize * 1.8, 110);
-  const rows = groupPeopleByGeneration();
-  rows.forEach((people) => {
-    people.sort((a, b) => a.x - b.x);
-    for (let index = 1; index < people.length; index += 1) {
-      const previous = people[index - 1];
-      const current = people[index];
-      if (current.x - previous.x < minGap) {
-        current.x = alignX(previous.x + minGap);
-      }
-    }
-  });
-}
-
-function normalizeSiblingSpacing(focusPersonId = null) {
-  const groups = collectSiblingGroups();
-  const used = new Set();
-  groups.forEach((group) => {
-    const members = group.members
-      .map(getPerson)
-      .filter(Boolean)
-      .sort((a, b) => a.x - b.x || a.label.localeCompare(b.label, "zh-CN"));
-    if (members.length < 2) return;
-    const groupKey = members.map((person) => person.id).sort().join("|");
-    if (used.has(groupKey)) return;
-    used.add(groupKey);
-
-    const generation = members[0].generation ?? generationFromY(members[0].y);
-    members.forEach((person) => {
-      person.generation = generation;
-      person.y = generationY(generation);
-    });
-
-    const center = getSiblingGroupCenter(members, group, focusPersonId);
-    const startX = center - ((members.length - 1) * state.layout.siblingSpacing) / 2;
-    members.forEach((person, index) => {
-      person.x = alignX(startX + index * state.layout.siblingSpacing);
-    });
-  });
-}
-
-function collectSiblingGroups() {
-  const groups = [];
-  const parentChildRelations = state.relationships.filter((relation) => relation.type === "parentChild");
-  const partnerRelations = state.relationships.filter((relation) => relation.type === "partner");
-
-  partnerRelations.forEach((partner) => {
-    const children = parentChildRelations
-      .filter((relation) => relation.sourceId === partner.sourceId || relation.sourceId === partner.targetId)
-      .map((relation) => relation.targetId)
-      .filter((id, index, ids) => ids.indexOf(id) === index);
-    if (children.length > 1) {
-      groups.push({
-        kind: "parents",
-        parentIds: [partner.sourceId, partner.targetId],
-        members: children,
-      });
-    }
-  });
-
-  const childrenBySingleParent = new Map();
-  parentChildRelations.forEach((relation) => {
-    if (!childrenBySingleParent.has(relation.sourceId)) {
-      childrenBySingleParent.set(relation.sourceId, new Set());
-    }
-    childrenBySingleParent.get(relation.sourceId).add(relation.targetId);
-  });
-  childrenBySingleParent.forEach((children, parentId) => {
-    if (children.size > 1) {
-      groups.push({
-        kind: "singleParent",
-        parentIds: [parentId],
-        members: Array.from(children),
-      });
-    }
-  });
-
-  state.relationships
-    .filter((relation) => relation.type === "sibling")
-    .forEach((relation) => {
-      const members = expandSiblingSet(relation.sourceId, relation.targetId);
-      if (members.size > 1) {
-        groups.push({
-          kind: "sibling",
-          parentIds: [],
-          members: Array.from(members),
-        });
+      if (resetManual || !child.manualPosition) {
+        child.x = childStartX + index * PERSON_GAP;
+        child.y = childY;
       }
     });
-
-  return groups;
+  });
 }
 
-function expandSiblingSet(sourceId, targetId) {
-  const members = new Set([sourceId, targetId]);
+function alignSingleParentChildren(resetManual) {
+  const twoParentChildren = new Set(
+    collectFamilyUnits().flatMap((unit) => unit.children.map((child) => child.id))
+  );
+  state.project.people.forEach((child) => {
+    if (twoParentChildren.has(child.id)) return;
+    const parents = findParents(child.id);
+    if (parents.length !== 1) return;
+    const parent = parents[0];
+    if (resetManual || !child.manualPosition) {
+      child.x = parent.x;
+      child.y = parent.y + GENERATION_GAP;
+    }
+  });
+}
+
+function clearManualPositions() {
+  state.project.people.forEach((person) => {
+    person.manualPosition = false;
+  });
+}
+
+function avoidNodeCollisionsByGeneration() {
+  const generations = computeGenerations();
+  const groups = new Map();
+  state.project.people.forEach((person) => {
+    const generation = generations.get(person.id) ?? 0;
+    if (!groups.has(generation)) groups.set(generation, []);
+    groups.get(generation).push(person);
+  });
+
+  groups.forEach((people) => {
+    const ordered = people.sort((a, b) => a.x - b.x || compareLayoutOrder(a, b));
+    for (let index = 1; index < ordered.length; index += 1) {
+      const previous = ordered[index - 1];
+      const current = ordered[index];
+      const minX = previous.x + MIN_NODE_GAP;
+      if (current.x < minX) {
+        current.x = minX;
+      }
+    }
+    const center = average(ordered.map((person) => person.x));
+    const targetCenter = CANVAS_CENTER_X;
+    const shift = targetCenter - center;
+    ordered.forEach((person) => {
+      person.x += shift;
+    });
+  });
+}
+
+function average(values) {
+  if (values.length === 0) return NaN;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function romanNumeral(value) {
+  const table = [
+    ["X", 10],
+    ["IX", 9],
+    ["V", 5],
+    ["IV", 4],
+    ["I", 1]
+  ];
+  let remaining = value;
+  let result = "";
+  table.forEach(([symbol, amount]) => {
+    while (remaining >= amount) {
+      result += symbol;
+      remaining -= amount;
+    }
+  });
+  return result || "I";
+}
+
+function computeGenerations() {
+  const map = new Map();
+  const proband = state.project.people.find((person) => person.proband) || state.project.people[0];
+  if (!proband) return map;
+  map.set(proband.id, 0);
+
   let changed = true;
   while (changed) {
     changed = false;
-    state.relationships
-      .filter((relation) => relation.type === "sibling")
-      .forEach((relation) => {
-        const touchesGroup = members.has(relation.sourceId) || members.has(relation.targetId);
-        if (!touchesGroup) return;
-        const before = members.size;
-        members.add(relation.sourceId);
-        members.add(relation.targetId);
-        if (members.size !== before) changed = true;
-      });
-  }
-  return members;
-}
-
-function getSiblingGroupCenter(members, group, focusPersonId) {
-  const parents = group.parentIds.map(getPerson).filter(Boolean);
-  if (parents.length === 2) {
-    return (parents[0].x + parents[1].x) / 2;
-  }
-  if (parents.length === 1) {
-    return parents[0].x;
-  }
-  if (focusPersonId && members.some((person) => person.id === focusPersonId)) {
-    const focus = getPerson(focusPersonId);
-    if (focus) return focus.x;
-  }
-  return members.reduce((sum, person) => sum + person.x, 0) / members.length;
-}
-
-function generationY(generation) {
-  return 160 + clampGeneration(generation) * state.layout.generationSpacing;
-}
-
-function GENERATION_Y(generation) {
-  return generationY(generation);
-}
-
-function generationFromY(y) {
-  let nearest = 0;
-  let nearestDistance = Infinity;
-  GENERATIONS.forEach((generation) => {
-    const distance = Math.abs(y - generationY(generation.index));
-    if (distance < nearestDistance) {
-      nearest = generation.index;
-      nearestDistance = distance;
-    }
-  });
-  return nearest;
-}
-
-function clampGeneration(generation) {
-  return Math.max(0, Math.min(GENERATIONS.length - 1, Number(generation) || 0));
-}
-
-function clampX(x) {
-  return Math.max(MIN_NODE_X, Math.min(MAX_NODE_X, x));
-}
-
-function snapX(x) {
-  return Math.round(clampX(x) / 20) * 20;
-}
-
-function alignX(x) {
-  return clampX(Math.round(x));
-}
-
-function shiftGeneration(delta) {
-  const person = getPerson(state.selectedPersonId);
-  if (!person) return;
-  person.generation = clampGeneration((person.generation ?? generationFromY(person.y)) + delta);
-  person.y = generationY(person.generation);
-  form.generation.value = String(person.generation);
-  saveState();
-  render();
-  updateStatus(`已移动到第 ${GENERATIONS[person.generation].label} 代`);
-}
-
-function syncLayoutControls() {
-  layoutControls.nodeSize.value = state.layout.nodeSize;
-  layoutControls.nodeSizeValue.textContent = state.layout.nodeSize;
-  layoutControls.generationSpacing.value = state.layout.generationSpacing;
-  layoutControls.generationSpacingValue.textContent = state.layout.generationSpacing;
-  layoutControls.siblingSpacing.value = state.layout.siblingSpacing;
-  layoutControls.siblingSpacingValue.textContent = state.layout.siblingSpacing;
-  layoutControls.layoutSpacing.value = state.layout.layoutSpacing;
-  layoutControls.layoutSpacingValue.textContent = state.layout.layoutSpacing;
-}
-
-function applyLayoutSetting(key, value) {
-  state.layout[key] = Number(value);
-  if (key === "generationSpacing") {
-    state.people.forEach((person) => {
-      person.y = generationY(person.generation ?? generationFromY(person.y));
+    state.project.relationships.forEach((rel) => {
+      if (rel.type === "parentChild") {
+        const parentGen = map.get(rel.parent);
+        const childGen = map.get(rel.child);
+        if (childGen !== undefined && parentGen === undefined) {
+          map.set(rel.parent, childGen - 1);
+          changed = true;
+        } else if (parentGen !== undefined && childGen === undefined) {
+          map.set(rel.child, parentGen + 1);
+          changed = true;
+        }
+      }
+      if (rel.type === "partner") {
+        const gen1 = map.get(rel.person1);
+        const gen2 = map.get(rel.person2);
+        if (gen1 !== undefined && gen2 === undefined) {
+          map.set(rel.person2, gen1);
+          changed = true;
+        } else if (gen2 !== undefined && gen1 === undefined) {
+          map.set(rel.person1, gen2);
+          changed = true;
+        }
+      }
     });
   }
-  if (key === "siblingSpacing") {
-    normalizeSiblingSpacing();
+
+  state.project.people.forEach((person) => {
+    if (!map.has(person.id)) map.set(person.id, 0);
+  });
+
+  const min = Math.min(...map.values());
+  if (min < 0) {
+    map.forEach((value, key) => map.set(key, value - min));
   }
-  syncLayoutControls();
-  saveState();
-  render();
+  return map;
 }
 
-function resetLayoutSettings() {
-  state.layout = { ...DEFAULT_LAYOUT };
-  state.people.forEach((person) => {
-    person.y = generationY(person.generation ?? generationFromY(person.y));
-  });
-  normalizeSiblingSpacing();
-  syncLayoutControls();
-  saveState();
-  render();
-  updateStatus("布局设置已恢复默认");
-}
-
-function clearAll() {
-  if (!confirm("确认清空当前谱系图？")) return;
-  state.people = [];
-  state.relationships = [];
-  state.selectedPersonId = null;
-  state.selectedRelationshipId = null;
-  state.pendingConnectionId = null;
-  state.nextPersonNumber = 1;
-  localStorage.removeItem(STORAGE_KEY);
-  fillInspector();
-  render();
-  updateStatus("画布已清空");
-}
-
-function exportPng() {
-  const clone = svg.cloneNode(true);
-  clone.setAttribute("width", String(CANVAS_WIDTH));
-  clone.setAttribute("height", String(CANVAS_HEIGHT));
-  const exportStyle = createSvgElement("style");
-  exportStyle.textContent = `
-    .node-label{font-size:14px;fill:#172033;text-anchor:middle;dominant-baseline:middle;font-family:Microsoft YaHei,Segoe UI,Arial,sans-serif}
-    .node-meta{font-size:12px;fill:#64748b;text-anchor:middle;font-family:Microsoft YaHei,Segoe UI,Arial,sans-serif}
-    .relationship-line{stroke:#334155;stroke-width:2;fill:none}
-    .relationship-line.parentChild{marker-end:none}
-    .relationship-line.sibling{stroke-dasharray:none}
-    .relationship-guide{stroke:#334155;stroke-width:2;fill:none}
-    .generation-line{stroke:#9fb1c9;stroke-width:1.5;stroke-dasharray:8 8}
-    .generation-label{fill:#475569;font-size:18px;font-weight:700;font-family:Microsoft YaHei,Segoe UI,Arial,sans-serif}
-    .generation-band{fill:rgba(255,255,255,0.28)}
-    .proband-arrow{stroke:#2563eb;stroke-width:2.5;marker-end:url(#arrow)}
-    .deceased-line{stroke:#b91c1c;stroke-width:2}
-    .selection-ring{display:none}
-  `;
-  clone.insertBefore(createSvgElement("rect", {
-    x: 0,
-    y: 0,
-    width: CANVAS_WIDTH,
-    height: CANVAS_HEIGHT,
-    fill: "#ffffff",
-  }), clone.firstChild);
-  clone.insertBefore(exportStyle, clone.firstChild);
-
-  const serializer = new XMLSerializer();
-  const source = serializer.serializeToString(clone);
-  const blob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const image = new Image();
-  image.onload = () => {
-    const canvas = document.createElement("canvas");
-    canvas.width = CANVAS_WIDTH;
-    canvas.height = CANVAS_HEIGHT;
-    const context = canvas.getContext("2d");
-    context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(image, 0, 0);
-    URL.revokeObjectURL(url);
-    const link = document.createElement("a");
-    link.download = `疾病家族谱系图-${new Date().toISOString().slice(0, 10)}.png`;
-    link.href = canvas.toDataURL("image/png");
-    link.click();
-    updateStatus("PNG 已导出");
+function startDrag(event, personId) {
+  event.preventDefault();
+  state.selectedPersonId = personId;
+  updateControls();
+  const point = svgPoint(event);
+  const person = getPerson(personId);
+  state.dragging = {
+    personId,
+    dx: point.x - person.x,
+    dy: point.y - person.y
   };
-  image.src = url;
+  event.currentTarget.setPointerCapture(event.pointerId);
 }
 
-document.querySelectorAll(".palette-item").forEach((item) => {
-  item.addEventListener("dragstart", (event) => {
-    event.dataTransfer.setData("text/plain", item.dataset.sex);
-  });
-});
+function onPointerMove(event) {
+  if (!state.dragging) return;
+  const person = getPerson(state.dragging.personId);
+  if (!person) return;
+  const point = svgPoint(event);
+  person.x = point.x - state.dragging.dx;
+  person.y = point.y - state.dragging.dy;
+  person.manualPosition = true;
+  renderAll();
+}
 
-canvasWrap.addEventListener("dragover", (event) => {
+function endDrag() {
+  if (!state.dragging) return;
+  const draggedPersonId = state.dragging.personId;
+  state.dragging = null;
+  reorderGenerationByCurrentX(draggedPersonId);
+  autoLayout(true);
+  state.selectedPersonId = draggedPersonId;
+  commitChange("同代顺序已调整");
+}
+
+function reorderGenerationByCurrentX(personId) {
+  const generations = computeGenerations();
+  const generation = generations.get(personId);
+  if (generation === undefined) return;
+  state.project.people
+    .filter((person) => generations.get(person.id) === generation)
+    .sort((a, b) => a.x - b.x || projectOrder(a.id) - projectOrder(b.id))
+    .forEach((person, index) => {
+      person.layoutOrder = index + 1;
+      person.manualPosition = false;
+    });
+}
+
+function svgPoint(event) {
+  const rect = els.pedigreeSvg.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left - state.offsetX) / state.scale,
+    y: (event.clientY - rect.top - state.offsetY) / state.scale
+  };
+}
+
+function onCanvasWheel(event) {
   event.preventDefault();
-});
+  const delta = event.deltaY > 0 ? -0.08 : 0.08;
+  setZoom(state.scale + delta);
+}
 
-canvasWrap.addEventListener("drop", (event) => {
-  event.preventDefault();
-  const sex = event.dataTransfer.getData("text/plain") || "unknown";
-  const point = getMousePosition(event);
-  addPerson(sex, Math.round(point.x / 10) * 10, Math.round(point.y / 10) * 10);
-  updateStatus("已添加人员，可在右侧编辑信息");
-});
+function setZoom(value) {
+  state.scale = Math.min(1.8, Math.max(0.45, value));
+  commitChange(`缩放 ${Math.round(state.scale * 100)}%`);
+}
 
-svg.addEventListener("click", () => {
-  hideContextMenu();
-  state.selectedPersonId = null;
-  state.selectedRelationshipId = null;
-  fillInspector();
-  render();
-});
+function resetView() {
+  state.scale = 1;
+  state.offsetX = 0;
+  state.offsetY = 0;
+  commitChange("视图已重置");
+}
 
-nodeContextMenu.addEventListener("click", (event) => {
-  const parent = event.target.closest(".context-parent");
-  if (parent) {
-    event.preventDefault();
-    event.stopPropagation();
-    parent.closest(".context-submenu")?.classList.contains("open")
-      ? closeRelativeSubmenu()
-      : openRelativeSubmenu();
+function autosave() {
+  localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(state.project));
+}
+
+function restoreAutosave() {
+  const raw = localStorage.getItem(AUTOSAVE_KEY);
+  if (!raw) return false;
+  try {
+    const project = JSON.parse(raw);
+    validateProject(project);
+    state.project = normalizeProject(project);
+    state.scale = state.project.viewport?.scale || 1;
+    state.offsetX = state.project.viewport?.offsetX || 0;
+    state.offsetY = state.project.viewport?.offsetY || 0;
+    state.selectedPersonId = state.project.people[0]?.id || null;
+    setStatus("已恢复自动保存");
+    return true;
+  } catch {
+    localStorage.removeItem(AUTOSAVE_KEY);
+    return false;
+  }
+}
+
+function saveProjectJson() {
+  const content = JSON.stringify(state.project, null, 2);
+  const blob = new Blob([content], { type: "application/json" });
+  downloadBlob(blob, `${safeFileName(state.project.title)}_${timeStamp()}.json`);
+  setStatus("JSON 已保存");
+}
+
+function loadProjectJson(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const project = JSON.parse(reader.result);
+      validateProject(project);
+      state.project = normalizeProject(project);
+      state.selectedPersonId = state.project.people[0]?.id || null;
+      state.scale = state.project.viewport?.scale || 1;
+      state.offsetX = state.project.viewport?.offsetX || 0;
+      state.offsetY = state.project.viewport?.offsetY || 0;
+      commitChange("JSON 已加载");
+    } catch (error) {
+      setStatus(`加载失败：${error.message}`);
+    } finally {
+      event.target.value = "";
+    }
+  };
+  reader.readAsText(file, "utf-8");
+}
+
+function validateProject(project) {
+  if (!project || !Array.isArray(project.people) || !Array.isArray(project.relationships)) {
+    throw new Error("不是有效的项目文件");
+  }
+}
+
+function normalizeProject(project) {
+  return {
+    ...createProject(),
+    ...project,
+    settings: { ...createProject().settings, ...(project.settings || {}) },
+    viewport: { ...createProject().viewport, ...(project.viewport || {}) },
+    people: project.people.map((person, index) => ({
+      ...createPerson(),
+      ...person,
+      diagnoses: Array.isArray(person.diagnoses) ? person.diagnoses : [],
+      layoutOrder: Number.isFinite(person.layoutOrder) ? person.layoutOrder : index + 1
+    }))
+  };
+}
+
+async function exportPng() {
+  try {
+    const sourceSvg = els.pedigreeSvg.cloneNode(true);
+    const bounds = getContentBounds();
+    const padding = 70;
+    const width = Math.max(600, bounds.width + padding * 2);
+    const height = Math.max(420, bounds.height + padding * 2);
+    sourceSvg.setAttribute("width", width);
+    sourceSvg.setAttribute("height", height);
+    sourceSvg.setAttribute("viewBox", `${bounds.x - padding} ${bounds.y - padding} ${width} ${height}`);
+    sourceSvg.insertBefore(svgEl("rect", {
+      x: bounds.x - padding,
+      y: bounds.y - padding,
+      width,
+      height,
+      fill: "#ffffff"
+    }), sourceSvg.firstChild);
+
+    const style = document.createElement("style");
+    style.textContent = collectExportStyles();
+    sourceSvg.insertBefore(style, sourceSvg.firstChild);
+
+    const svgText = new XMLSerializer().serializeToString(sourceSvg);
+    const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = width * 2;
+      canvas.height = height * 2;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      canvas.toBlob((pngBlob) => {
+        downloadBlob(pngBlob, `${safeFileName(state.project.title)}_${timeStamp()}.png`);
+        setStatus("PNG 已导出");
+      }, "image/png");
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      setStatus("PNG 导出失败");
+    };
+    image.src = url;
+  } catch (error) {
+    setStatus(`导出失败：${error.message}`);
+  }
+}
+
+function getContentBounds() {
+  if (state.project.people.length === 0) {
+    return { x: 0, y: 0, width: 600, height: 420 };
+  }
+  const xs = state.project.people.map((person) => person.x);
+  const ys = state.project.people.map((person) => person.y);
+  return {
+    x: Math.min(...xs) - 60,
+    y: Math.min(...ys) - 70,
+    width: Math.max(...xs) - Math.min(...xs) + 120,
+    height: Math.max(...ys) - Math.min(...ys) + 150
+  };
+}
+
+function collectExportStyles() {
+  return `
+    .link-line,.descent-line,.individual-line,.marriage-line,.sibling-line{stroke:#2f3a42;stroke-width:2.2;fill:none;stroke-linecap:square}
+    .person-symbol{stroke:#2f3a42;stroke-width:2.8}
+    .person-symbol.unaffected{fill:#fff}
+    .person-symbol.affected{fill:#2f3a42}
+    .person-symbol.suspected{fill:url(#suspectedPattern)}
+    .person-symbol.unknown{fill:#e2e8ec}
+    .person-label{font:13px "Microsoft YaHei", Arial, sans-serif;fill:#172026;text-anchor:middle;dominant-baseline:hanging}
+    .diagnosis-label{font:11px "Microsoft YaHei", Arial, sans-serif;fill:#65717b;text-anchor:middle;dominant-baseline:hanging}
+    .generation-label{font:700 15px "Microsoft YaHei", Arial, sans-serif;fill:#65717b;text-anchor:middle;dominant-baseline:middle}
+    .selected-ring{display:none}
+    .deceased-line{stroke:#b42318;stroke-width:2.4;stroke-linecap:round}
+    .proband-arrow{stroke:#b42318;stroke-width:2.4;fill:none;stroke-linecap:round}
+    .empty-canvas-text{font:18px "Microsoft YaHei", Arial, sans-serif;fill:#65717b;text-anchor:middle}
+  `;
+}
+
+function downloadBlob(blob, fileName) {
+  if (!blob) return;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function newProject() {
+  if (state.project.people.length > 0 && !confirm("新建项目会清空当前画布，是否继续？")) {
     return;
   }
-  const button = event.target.closest("button[data-action]");
-  if (!button || !contextMenuPersonId) return;
-  const personId = contextMenuPersonId;
-  hideContextMenu();
-  addRelative(personId, button.dataset.action);
-});
+  state.project = createProject();
+  state.selectedPersonId = null;
+  state.scale = 1;
+  state.offsetX = 0;
+  state.offsetY = 0;
+  commitChange("新项目已创建");
+}
 
-nodeContextMenu.querySelector(".context-submenu")?.addEventListener("mouseenter", openRelativeSubmenu);
-nodeContextMenu.querySelector(".context-submenu")?.addEventListener("mouseleave", scheduleCloseRelativeSubmenu);
-nodeContextMenu.querySelector(".context-submenu-panel")?.addEventListener("mouseenter", openRelativeSubmenu);
-nodeContextMenu.querySelector(".context-submenu-panel")?.addEventListener("mouseleave", scheduleCloseRelativeSubmenu);
+function safeFileName(value) {
+  return (value || "家系图").replace(/[\\/:*?"<>|]/g, "_");
+}
 
-window.addEventListener("click", (event) => {
-  if (!nodeContextMenu.hidden && !nodeContextMenu.contains(event.target)) {
-    hideContextMenu();
-  }
-});
+function timeStamp() {
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+}
 
-window.addEventListener("contextmenu", (event) => {
-  const closest = typeof event.target.closest === "function" ? event.target.closest.bind(event.target) : null;
-  if (closest && !closest(".node-group") && !closest(".context-menu")) {
-    hideContextMenu();
-  }
-});
-
-Object.values(form).forEach((input) => {
-  input.addEventListener("input", updateSelectedPerson);
-  input.addEventListener("change", updateSelectedPerson);
-});
-
-document.querySelectorAll(".relation-mode").forEach((button) => {
-  button.addEventListener("click", () => {
-    state.relationType = button.dataset.relation;
-    document.querySelectorAll(".relation-mode").forEach((item) => item.classList.remove("active"));
-    button.classList.add("active");
-    updateStatus(`当前关系类型：${relationName(state.relationType)}`);
-  });
-});
-
-document.getElementById("connectModeButton").addEventListener("click", () => {
-  state.connectMode = !state.connectMode;
-  state.pendingConnectionId = null;
-  updateConnectButton();
-  updateStatus(state.connectMode ? "请选择第一个人" : "已取消连接模式");
-});
-
-document.getElementById("deleteSelectedButton").addEventListener("click", deleteSelected);
-document.getElementById("addTemplateButton").addEventListener("click", addTemplate);
-document.getElementById("layoutButton").addEventListener("click", autoLayout);
-document.getElementById("generationUpButton").addEventListener("click", () => shiftGeneration(-1));
-document.getElementById("generationDownButton").addEventListener("click", () => shiftGeneration(1));
-layoutControls.nodeSize.addEventListener("input", (event) => applyLayoutSetting("nodeSize", event.target.value));
-layoutControls.generationSpacing.addEventListener("input", (event) => applyLayoutSetting("generationSpacing", event.target.value));
-layoutControls.siblingSpacing.addEventListener("input", (event) => applyLayoutSetting("siblingSpacing", event.target.value));
-layoutControls.layoutSpacing.addEventListener("input", (event) => applyLayoutSetting("layoutSpacing", event.target.value));
-document.getElementById("resetLayoutButton").addEventListener("click", resetLayoutSettings);
-document.getElementById("clearButton").addEventListener("click", clearAll);
-document.getElementById("exportButton").addEventListener("click", exportPng);
-
-window.addEventListener("keydown", (event) => {
-  if (event.key === "Delete" || event.key === "Backspace") {
-    const active = document.activeElement;
-    const editing = ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName);
-    if (!editing) deleteSelected();
-  }
-  if (event.key === "Escape" && state.connectMode) {
-    state.connectMode = false;
-    state.pendingConnectionId = null;
-    updateConnectButton();
-    updateStatus("已取消连接模式");
-  }
-  if (event.key === "Escape") {
-    hideContextMenu();
-  }
-});
-
-loadState();
-syncLayoutControls();
-refreshKinshipLabels();
-fillInspector();
-render();
-updateConnectButton();
-
+function setStatus(message) {
+  els.statusLine.textContent = message;
+}
