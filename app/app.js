@@ -1,18 +1,18 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 4.3
+   精神科遗传家族谱系图绘制工具 4.4
    纯前端、本地优先。本版新增：双胞胎（同卵/异卵）、携带者圆点、
    近亲婚配自动双线、拖动自由摆放开关、一键生成家族史文字。
    4.1：连线 T 形修复；新增"与已选成员结婚"连接已有节点为配偶；
         家族史不再把占位默认名当真名；删除孪生后清理孤立 twinGroup。
    4.2：固定同胞出生顺序；同胞小家庭整体平移；多配偶/半同胞婚配线避让。
-   4.3：显式 familyUnit 运行时模型；父母组合、子女分组、多配偶/半同胞统一从家庭单元绘制。
+   4.4：显式 marriage node；子女下降线挂到婚配节点，大家庭同胞线分段并增加分组间距。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "4.3";
+const VERSION = "4.4";
 
 // 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
 const PLACEHOLDER_NAMES = new Set([
@@ -485,6 +485,11 @@ function familyUnitId(parentIds) {
   return `fu:${key}`;
 }
 
+function marriageNodeId(parentIds) {
+  const key = parentIds.length ? coupleKey(parentIds) : "single";
+  return `mn:${key}`;
+}
+
 function normalizeFamilyParents(parents) {
   if (parents.length >= 2) {
     const male = parents.find((p) => p.sex === "male");
@@ -504,6 +509,7 @@ function buildFamilyUnitsFromRelationships() {
     if (!groups.has(key)) {
       groups.set(key, {
         id: familyUnitId(parents),
+        marriageNodeId: marriageNodeId(parents),
         parentKey: key,
         parentIds: parents,
         childIds: []
@@ -521,6 +527,7 @@ function buildFamilyUnitsFromRelationships() {
         .map((p) => p.id);
       return {
         id: u.id,
+        marriageNodeId: u.marriageNodeId,
         parentKey: u.parentKey,
         parentIds: u.parentIds,
         childIds,
@@ -540,6 +547,7 @@ function syncFamilyUnits() {
   state.familyUnits = units;
   state.project.familyUnits = units.map((u) => ({
     id: u.id,
+    marriageNodeId: u.marriageNodeId,
     parentKey: u.parentKey,
     parentIds: [...u.parentIds],
     childIds: [...u.childIds]
@@ -745,6 +753,9 @@ function moveNodeWithDescendants(node, dx, childrenOf) {
 function enforceSiblingBirthOrder(nodes, nodeOf, childrenOf) {
   const units = collectFamilyUnits();
   const applied = new Set();
+  const LARGE_SIBLING_COUNT = 6;
+  const SIBLING_GROUP_SIZE = 3;
+  const LARGE_SIBLING_GAP = PERSON_GAP * 0.28;
 
   units.forEach((u) => {
     const items = u.children
@@ -769,6 +780,15 @@ function enforceSiblingBirthOrder(nodes, nodeOf, childrenOf) {
       const dx = item.node.cx - before;
       shiftDescendantNodes(item.node, dx, childrenOf);
     });
+
+    if (ordered.length >= LARGE_SIBLING_COUNT) {
+      ordered.forEach((item, idx) => {
+        const groupsBefore = Math.floor(idx / SIBLING_GROUP_SIZE);
+        if (groupsBefore === 0) return;
+        const dx = groupsBefore * LARGE_SIBLING_GAP;
+        moveNodeWithDescendants(item.node, dx, childrenOf);
+      });
+    }
   });
 
   // Repack each generation after slot permutation, moving whole couple nodes together.
@@ -912,17 +932,17 @@ function drawGenerationLabels(root) {
 
 function drawRelationships(root) {
   const units = collectFamilyUnits();
-  const partnerRoutes = computePartnerRoutes();
+  const marriageNodes = computeMarriageNodes();
 
-  // 配偶线：同排水平连接；近亲婚配画双线；若两人不同高（被拖动过）画台阶折线
+  // 配偶线：每段婚配关系都先落到一个不可见 marriage node；近亲婚配画双线。
   state.project.relationships.filter((r) => r.type === "partner").forEach((r) => {
     const a = getPerson(r.person1), b = getPerson(r.person2);
     if (!a || !b) return;
-    const route = partnerRoutes.get(coupleKey([a.id, b.id]));
+    const route = marriageNodes.get(coupleKey([a.id, b.id]));
     const consang = areConsanguineous(a.id, b.id);
     if (route && route.kind === "line") {
-      root.appendChild(svgEl("line", { x1: route.x1, y1: route.y, x2: route.x2, y2: route.y, class: "marriage-line" }));
-      if (consang) root.appendChild(svgEl("line", { x1: route.x1, y1: route.y + 3, x2: route.x2, y2: route.y + 3, class: "marriage-line" }));
+      root.appendChild(svgEl("line", { x1: route.left.x, y1: route.left.y, x2: route.right.x, y2: route.right.y, class: "marriage-line" }));
+      if (consang) root.appendChild(svgEl("line", { x1: route.left.x, y1: route.left.y + 3, x2: route.right.x, y2: route.right.y + 3, class: "marriage-line" }));
     } else if (route && route.kind === "path") {
       root.appendChild(svgEl("path", { d: route.d, class: "marriage-line" }));
       if (consang) root.appendChild(svgEl("path", { d: route.d2, class: "marriage-line" }));
@@ -942,13 +962,13 @@ function drawRelationships(root) {
     const pa = getPerson(u.parentIds[0]);
     const pb = u.parentIds.length === 2 ? getPerson(u.parentIds[1]) : null;
     if (!pa || (u.parentIds.length === 2 && !pb)) return null;
-    const route = pb ? partnerRoutes.get(coupleKey([pa.id, pb.id])) : null;
-    const dropX = pb ? (pa.x + pb.x) / 2 : pa.x;
-    const dropTopY = pb ? (route ? route.childY : (pa.y + pb.y) / 2) : pa.y + R;
+    const marriageNode = pb ? marriageNodes.get(coupleKey([pa.id, pb.id])) : null;
+    const dropX = pb ? (marriageNode ? marriageNode.x : (pa.x + pb.x) / 2) : pa.x;
+    const dropTopY = pb ? (marriageNode ? marriageNode.y : (pa.y + pb.y) / 2) : pa.y + R;
     const childTopY = Math.min(...u.children.map((c) => c.y)) - R;
     const xs = u.children.map((c) => c.x);
     const lo = Math.min(...xs, dropX), hi = Math.max(...xs, dropX);
-    return { u, dropX, dropTopY, childTopY, lo, hi, level: 0 };
+    return { u, marriageNode, dropX, dropTopY, childTopY, lo, hi, level: 0 };
   }).filter(Boolean);
 
   // 按子代行分组，行内做区间错层（贪心着色）
@@ -974,9 +994,7 @@ function drawRelationships(root) {
   fams.forEach((f) => {
     const sibY = f.childTopY - SIBSHIP_DROP + R - f.level * LEVEL_STEP;
     root.appendChild(svgEl("line", { x1: f.dropX, y1: f.dropTopY, x2: f.dropX, y2: sibY, class: "descent-line" }));
-    if (f.hi - f.lo > 0.5) {
-      root.appendChild(svgEl("line", { x1: f.lo, y1: sibY, x2: f.hi, y2: sibY, class: "sibling-line" }));
-    }
+    drawSiblingLine(root, f, sibY);
     // 将子女按 twinGroup 分组：单胎从横线垂直下降；双胎从同一顶点斜线分叉
     const singles = [], twinGroups = new Map();
     f.u.children.forEach((c) => {
@@ -1007,16 +1025,35 @@ function drawRelationships(root) {
   });
 }
 
-function computePartnerRoutes() {
+function drawSiblingLine(root, f, sibY) {
+  if (f.hi - f.lo <= 0.5) return;
+  const childXs = f.u.children.map((c) => c.x).sort((a, b) => a - b);
+  const anchors = [...new Set([...childXs, f.dropX].map((x) => Math.round(x * 100) / 100))].sort((a, b) => a - b);
+  if (childXs.length < 6 || anchors.length < 3) {
+    root.appendChild(svgEl("line", { x1: f.lo, y1: sibY, x2: f.hi, y2: sibY, class: "sibling-line" }));
+    return;
+  }
+  for (let i = 0; i < anchors.length - 1; i++) {
+    root.appendChild(svgEl("line", { x1: anchors[i], y1: sibY, x2: anchors[i + 1], y2: sibY, class: "sibling-line" }));
+  }
+}
+
+function computeMarriageNodes() {
   const routes = new Map();
   const rels = state.project.relationships.filter((r) => r.type === "partner");
   const sameRow = [];
+  const partnerDegree = new Map();
+  rels.forEach((r) => {
+    partnerDegree.set(r.person1, (partnerDegree.get(r.person1) || 0) + 1);
+    partnerDegree.set(r.person2, (partnerDegree.get(r.person2) || 0) + 1);
+  });
 
   rels.forEach((r) => {
     const a = getPerson(r.person1), b = getPerson(r.person2);
     if (!a || !b) return;
     const [l, rt] = a.x <= b.x ? [a, b] : [b, a];
     const key = coupleKey([a.id, b.id]);
+    const id = marriageNodeId([a.id, b.id]);
     if (Math.abs(l.y - rt.y) < 1) {
       const y = l.y;
       const x1 = l.x + R, x2 = rt.x - R;
@@ -1024,12 +1061,18 @@ function computePartnerRoutes() {
         p.id !== l.id && p.id !== rt.id &&
         Math.abs(p.y - y) < 1 &&
         p.x - R < x2 && p.x + R > x1);
-      sameRow.push({ key, l, rt, y, x1, x2, blocked });
+      const multiPartner = (partnerDegree.get(l.id) || 0) > 1 || (partnerDegree.get(rt.id) || 0) > 1;
+      sameRow.push({ key, id, l, rt, y, x1, x2, blocked, multiPartner });
     } else {
       const mx = (l.x + rt.x) / 2;
+      const my = (l.y + rt.y) / 2;
       routes.set(key, {
+        id,
         kind: "path",
-        childY: (l.y + rt.y) / 2,
+        x: mx,
+        y: my,
+        left: { x: l.x + R, y: l.y },
+        right: { x: rt.x - R, y: rt.y },
         d: `M ${l.x + R} ${l.y} H ${mx} V ${rt.y} H ${rt.x - R}`,
         d2: `M ${l.x + R} ${l.y + 3} H ${mx + 3} V ${rt.y} H ${rt.x - R}`,
       });
@@ -1040,8 +1083,16 @@ function computePartnerRoutes() {
   sameRow
     .sort((a, b) => a.y - b.y || a.x1 - b.x1 || a.x2 - b.x2)
     .forEach((r) => {
-      if (!r.blocked) {
-        routes.set(r.key, { kind: "line", childY: r.y, x1: r.x1, x2: r.x2, y: r.y });
+      const mx = (r.x1 + r.x2) / 2;
+      if (!r.blocked && !r.multiPartner) {
+        routes.set(r.key, {
+          id: r.id,
+          kind: "line",
+          x: mx,
+          y: r.y,
+          left: { x: r.x1, y: r.y },
+          right: { x: r.x2, y: r.y }
+        });
         return;
       }
 
@@ -1055,7 +1106,16 @@ function computePartnerRoutes() {
       const laneY = r.y - R - 18 - lane * 12;
       const d = `M ${r.x1} ${r.y} V ${laneY} H ${r.x2} V ${r.y}`;
       const d2 = `M ${r.x1 + 3} ${r.y} V ${laneY + 4} H ${r.x2 - 3} V ${r.y}`;
-      routes.set(r.key, { kind: "path", childY: laneY, d, d2 });
+      routes.set(r.key, {
+        id: r.id,
+        kind: "path",
+        x: mx,
+        y: laneY,
+        left: { x: r.x1, y: r.y },
+        right: { x: r.x2, y: r.y },
+        d,
+        d2
+      });
     });
 
   return routes;
