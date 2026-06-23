@@ -1,152 +1,165 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>精神科遗传家族谱系图 2.0</title>
-  <link rel="stylesheet" href="./styles.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>精神科遗传家族谱系图绘制工具 3.0</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div class="app-shell">
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-mark" aria-hidden="true">谱</div>
-        <div>
-          <h1>精神科遗传家族谱系图</h1>
-          <p id="projectMeta">未命名家系图</p>
-        </div>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark">⌘</span>
+      <div>
+        <h1>家族谱系图绘制工具 <span class="ver">3.0</span></h1>
+        <p id="projectMeta" class="brand-sub">未命名家系图 · 0 名成员</p>
       </div>
-      <div class="top-actions" aria-label="项目操作">
-        <button class="icon-button" id="newProjectBtn" title="新建项目" aria-label="新建项目">＋</button>
-        <button class="icon-button" id="saveJsonBtn" title="保存 JSON" aria-label="保存 JSON">S</button>
-        <label class="icon-button file-action" title="加载 JSON" aria-label="加载 JSON">
-          O
-          <input id="loadJsonInput" type="file" accept="application/json,.json">
-        </label>
-        <button class="primary-button" id="exportPngBtn">导出 PNG</button>
-      </div>
-    </header>
+    </div>
+    <div class="header-actions">
+      <button id="undoBtn" class="ghost-btn" title="撤销 (Ctrl+Z)" disabled>↶ 撤销</button>
+      <button id="redoBtn" class="ghost-btn" title="重做 (Ctrl+Y)" disabled>↷ 重做</button>
+      <span class="divider"></span>
+      <button id="newProjectBtn" class="ghost-btn" title="新建空白家系图">新建</button>
+      <button id="saveJsonBtn" class="ghost-btn" title="保存为 JSON 项目文件">保存项目</button>
+      <label for="loadJsonInput" class="ghost-btn file-label" title="加载 JSON 项目文件">加载项目</label>
+      <input id="loadJsonInput" type="file" accept="application/json,.json" hidden />
+      <span class="divider"></span>
+      <button id="exportPngBtn" class="primary-btn" title="导出 PNG 图片">导出 PNG</button>
+      <button id="exportSvgBtn" class="primary-btn" title="导出 SVG 矢量图">导出 SVG</button>
+    </div>
+  </header>
 
-    <main class="workspace">
-      <aside class="panel left-panel" aria-label="绘制操作">
-        <section class="panel-section">
-          <h2>成员</h2>
-          <button class="wide-button" id="addPersonBtn">添加成员</button>
-          <button class="wide-button" id="setProbandBtn">设为先证者</button>
-          <button class="wide-button danger" id="deletePersonBtn">删除选中</button>
-        </section>
+  <main class="app-main">
+    <!-- 左侧操作栏 -->
+    <aside class="panel left-panel">
+      <section class="panel-block">
+        <h2 class="panel-title">开始</h2>
+        <button id="addProbandBtn" class="action-btn accent">＋ 添加先证者</button>
+        <button id="addPersonBtn" class="action-btn">＋ 添加独立成员</button>
+        <p class="hint">从先证者开始，选中任意成员后用下方按钮扩展家系。</p>
+      </section>
 
-        <section class="panel-section">
-          <h2>亲属关系</h2>
-          <div class="button-grid">
-            <button id="addFatherBtn">父亲</button>
-            <button id="addMotherBtn">母亲</button>
-            <button id="addPartnerBtn">配偶</button>
-            <button id="addChildBtn">子女</button>
-            <button id="addSiblingBtn">兄弟姐妹</button>
-            <button id="autoLayoutBtn">自动排版</button>
-          </div>
-        </section>
-
-        <section class="panel-section">
-          <h2>视图</h2>
-          <div class="button-grid compact">
-            <button id="zoomInBtn" title="放大">＋</button>
-            <button id="zoomOutBtn" title="缩小">-</button>
-            <button id="resetViewBtn">重置</button>
-          </div>
-        </section>
-
-        <section class="panel-section">
-          <h2>图例</h2>
-          <div class="legend">
-            <span><i class="legend-shape square"></i>男性</span>
-            <span><i class="legend-shape circle"></i>女性</span>
-            <span><i class="legend-shape diamond"></i>未知</span>
-            <span><i class="legend-fill"></i>患病</span>
-          </div>
-        </section>
-      </aside>
-
-      <section class="canvas-panel" aria-label="谱系图画布">
-        <div class="canvas-toolbar">
-          <input id="projectTitleInput" type="text" aria-label="项目名称" value="未命名家系图">
-          <div class="status-line" id="statusLine">准备就绪</div>
-        </div>
-        <div class="canvas-wrap" id="canvasWrap">
-          <svg id="pedigreeSvg" role="img" aria-label="家族谱系图"></svg>
+      <section class="panel-block">
+        <h2 class="panel-title">为选中成员添加亲属</h2>
+        <div class="relation-grid">
+          <button id="addFatherBtn" class="action-btn" disabled>父亲 <kbd>F</kbd></button>
+          <button id="addMotherBtn" class="action-btn" disabled>母亲 <kbd>M</kbd></button>
+          <button id="addPartnerBtn" class="action-btn span2" disabled>配偶 <kbd>E</kbd></button>
+          <button id="addBrotherBtn" class="action-btn" disabled>兄弟 <kbd>B</kbd></button>
+          <button id="addSisterBtn" class="action-btn" disabled>姐妹 <kbd>S</kbd></button>
+          <button id="addSonBtn" class="action-btn" disabled>儿子 <kbd>C</kbd></button>
+          <button id="addDaughterBtn" class="action-btn" disabled>女儿 <kbd>D</kbd></button>
         </div>
       </section>
 
-      <aside class="panel right-panel" aria-label="成员属性">
-        <section class="panel-section">
-          <h2>属性</h2>
-          <div id="emptySelection" class="empty-state">选择一个成员后编辑属性</div>
-          <form id="personForm" class="person-form" hidden>
-            <label>
-              显示名称
-              <input id="personName" type="text">
-            </label>
-            <label>
-              性别
-              <select id="personSex">
-                <option value="male">男性</option>
-                <option value="female">女性</option>
-                <option value="unknown">未知</option>
-              </select>
-            </label>
-            <label>
-              年龄
-              <input id="personAge" type="text" inputmode="numeric">
-            </label>
-            <label>
-              出生年份
-              <input id="personBirthYear" type="text" inputmode="numeric">
-            </label>
-            <label>
-              疾病状态
-              <select id="personAffectedStatus">
-                <option value="unaffected">未患病</option>
-                <option value="affected">患病</option>
-                <option value="suspected">疑似</option>
-                <option value="unknown">未知</option>
-              </select>
-            </label>
-            <label>
-              诊断标签
-              <select id="diagnosisSelect">
-                <option value="">添加诊断</option>
-                <option value="精神分裂症">精神分裂症</option>
-                <option value="双相情感障碍">双相情感障碍</option>
-                <option value="抑郁障碍">抑郁障碍</option>
-                <option value="焦虑障碍">焦虑障碍</option>
-                <option value="强迫障碍">强迫障碍</option>
-                <option value="自闭谱系障碍">自闭谱系障碍</option>
-                <option value="注意缺陷多动障碍">注意缺陷多动障碍</option>
-                <option value="物质使用障碍">物质使用障碍</option>
-                <option value="人格障碍">人格障碍</option>
-                <option value="其他">其他</option>
-              </select>
-            </label>
-            <div class="tag-list" id="diagnosisTags"></div>
-            <label class="check-row">
-              <input id="personDeceased" type="checkbox">
-              <span>死亡</span>
-            </label>
-            <label class="check-row">
-              <input id="personProband" type="checkbox">
-              <span>先证者</span>
-            </label>
-            <label>
-              备注
-              <textarea id="personNotes" rows="4"></textarea>
-            </label>
-          </form>
-        </section>
-      </aside>
-    </main>
-  </div>
+      <section class="panel-block">
+        <h2 class="panel-title">排版与视图</h2>
+        <button id="autoLayoutBtn" class="action-btn">↳ 自动排版</button>
+        <div class="view-row">
+          <button id="zoomOutBtn" class="mini-btn" title="缩小">－</button>
+          <span id="zoomLabel" class="zoom-label">100%</span>
+          <button id="zoomInBtn" class="mini-btn" title="放大">＋</button>
+          <button id="resetViewBtn" class="mini-btn wide" title="重置视图">适应</button>
+        </div>
+      </section>
 
-  <script src="./app.js"></script>
+      <section class="panel-block">
+        <h2 class="panel-title">显示选项</h2>
+        <label class="check-row"><input type="checkbox" id="optShowNumber" checked /> 世代编号 (I-1)</label>
+        <label class="check-row"><input type="checkbox" id="optShowName" checked /> 成员名称</label>
+        <label class="check-row"><input type="checkbox" id="optShowDiagnosis" checked /> 诊断标签</label>
+        <label class="check-row"><input type="checkbox" id="optShowAge" /> 年龄 / 出生年</label>
+        <label class="check-row"><input type="checkbox" id="optShowLegend" checked /> 图例</label>
+        <label class="check-row"><input type="checkbox" id="optShowTitle" checked /> 标题区</label>
+      </section>
+
+      <p class="kbd-hint">快捷键：F 父 · M 母 · E 配偶 · B 兄弟 · S 姐妹 · C 儿子 · D 女儿 · Del 删除 · Ctrl+Z 撤销 · 空白处拖动平移画布</p>
+    </aside>
+
+    <!-- 中间画布 -->
+    <section class="canvas-area" id="canvasArea">
+      <div class="canvas-wrap" id="canvasWrap">
+        <svg id="pedigreeSvg" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
+      <div class="status-line" id="statusLine">就绪</div>
+    </section>
+
+    <!-- 右侧属性栏 -->
+    <aside class="panel right-panel">
+      <div id="emptySelection" class="empty-state">
+        <p class="empty-emoji">○ □ ◇</p>
+        <p>未选中成员</p>
+        <p class="hint">在画布中点击一个节点，或先添加先证者。</p>
+      </div>
+
+      <form id="personForm" class="person-form" hidden onsubmit="return false">
+        <h2 class="panel-title">成员属性</h2>
+
+        <label class="field"><span>显示名称</span>
+          <input id="personName" type="text" placeholder="如 II-3 或 姓名" />
+        </label>
+
+        <div class="field-row">
+          <label class="field"><span>性别</span>
+            <select id="personSex">
+              <option value="male">男性 □</option>
+              <option value="female">女性 ○</option>
+              <option value="unknown">未知 ◇</option>
+            </select>
+          </label>
+          <label class="field"><span>疾病状态</span>
+            <select id="personAffectedStatus">
+              <option value="unaffected">未患病</option>
+              <option value="affected">患病</option>
+              <option value="suspected">疑似</option>
+              <option value="unknown">未知</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="field-row">
+          <label class="field"><span>年龄</span>
+            <input id="personAge" type="text" placeholder="如 42" />
+          </label>
+          <label class="field"><span>出生年份</span>
+            <input id="personBirthYear" type="text" placeholder="如 1984" />
+          </label>
+        </div>
+
+        <div class="check-grid">
+          <label class="check-row"><input type="checkbox" id="personDeceased" /> 已故 (／)</label>
+          <label class="check-row"><input type="checkbox" id="personProband" /> 先证者 (箭头)</label>
+        </div>
+
+        <label class="field"><span>精神科诊断</span>
+          <select id="diagnosisSelect">
+            <option value="">＋ 选择诊断标签…</option>
+            <option>精神分裂症</option>
+            <option>双相情感障碍</option>
+            <option>抑郁障碍</option>
+            <option>焦虑障碍</option>
+            <option>强迫障碍</option>
+            <option>自闭谱系障碍</option>
+            <option>注意缺陷多动障碍</option>
+            <option>物质使用障碍</option>
+            <option>人格障碍</option>
+            <option>其他</option>
+          </select>
+        </label>
+        <div id="diagnosisTags" class="tag-row"></div>
+
+        <label class="field"><span>备注</span>
+          <textarea id="personNotes" rows="2" placeholder="临床备注…"></textarea>
+        </label>
+
+        <div class="form-actions">
+          <button type="button" id="setProbandBtn" class="action-btn small">设为先证者</button>
+          <button type="button" id="deletePersonBtn" class="action-btn small danger">删除成员</button>
+        </div>
+      </form>
+    </aside>
+  </main>
+
+  <script src="app.js"></script>
 </body>
 </html>

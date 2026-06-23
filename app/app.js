@@ -1,25 +1,38 @@
-const AUTOSAVE_KEY = "psychiatric-pedigree-v2-autosave";
-const SVG_NS = "http://www.w3.org/2000/svg";
-const NODE_SIZE = 44;
-const NODE_RADIUS = NODE_SIZE / 2;
-const PERSON_GAP = NODE_SIZE * 3.2;
-const GENERATION_GAP = NODE_SIZE * 3.9;
-const MIN_NODE_GAP = NODE_SIZE * 3.05;
-const LINE_NODE_PADDING = NODE_SIZE * 1.15;
-const FAMILY_TRACK_STEP = NODE_SIZE * 0.38;
-const SIBSHIP_LINE_OFFSET = NODE_SIZE * 1.15;
-const LABEL_OFFSET = NODE_SIZE * 0.78;
-const DIAGNOSIS_OFFSET = NODE_SIZE * 1.2;
-const CANVAS_CENTER_X = 560;
-const FIRST_GENERATION_Y = 120;
+"use strict";
 
+/* ============================================================
+   精神科遗传家族谱系图绘制工具 3.0
+   纯前端、本地优先。重点：可靠的递归自动排版 + 规范渲染 + 顺手录入。
+   ============================================================ */
+
+const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
+const SVG_NS = "http://www.w3.org/2000/svg";
+const VERSION = "3.0";
+
+/* ---- 比例常量（以符号尺寸为基准，参考 NSGC/Bennett 规则）---- */
+const NODE_SIZE = 44;
+const R = NODE_SIZE / 2;
+const PERSON_GAP = NODE_SIZE * 2.7;      // 同代相邻个体中心距
+const GENERATION_GAP = NODE_SIZE * 3.7;  // 代际中心距
+const SIBSHIP_DROP = NODE_SIZE * 1.25;   // 同胞横线距子女符号顶部
+const LABEL_OFFSET = R + 14;             // 名称距符号中心
+const ID_OFFSET = R + 8;                 // 编号在符号上方
+const MAX_SCALE = 2.4;
+const MIN_SCALE = 0.3;
+
+/* ---- 全局状态 ---- */
 const state = {
   project: createProject(),
-  selectedPersonId: null,
+  selectedId: null,
   scale: 1,
   offsetX: 0,
   offsetY: 0,
-  dragging: null
+  drag: null,        // 拖动节点
+  pan: null,         // 平移画布
+  history: [],
+  future: [],
+  genMap: new Map(),
+  numberMap: new Map()
 };
 
 const els = {};
@@ -29,1188 +42,1181 @@ document.addEventListener("DOMContentLoaded", init);
 function init() {
   cacheElements();
   bindEvents();
-  const restored = restoreAutosave();
-  if (!restored) {
-    setStatus("新项目已创建");
-  }
-  updateControls();
-  renderAll();
+  if (!restoreAutosave()) setStatus("欢迎使用 · 点击「添加先证者」开始");
+  refresh(false);
+  fitView();
 }
 
+/* ============================================================
+   元素与事件
+   ============================================================ */
 function cacheElements() {
-  [
-    "projectMeta", "newProjectBtn", "saveJsonBtn", "loadJsonInput", "exportPngBtn",
-    "addPersonBtn", "setProbandBtn", "deletePersonBtn", "addFatherBtn", "addMotherBtn",
-    "addPartnerBtn", "addChildBtn", "addSiblingBtn", "autoLayoutBtn", "zoomInBtn",
-    "zoomOutBtn", "resetViewBtn", "projectTitleInput", "statusLine", "canvasWrap",
-    "pedigreeSvg", "emptySelection", "personForm", "personName", "personSex",
-    "personAge", "personBirthYear", "personAffectedStatus", "diagnosisSelect",
-    "diagnosisTags", "personDeceased", "personProband", "personNotes"
-  ].forEach((id) => {
-    els[id] = document.getElementById(id);
-  });
+  const ids = [
+    "projectMeta", "undoBtn", "redoBtn", "newProjectBtn", "saveJsonBtn",
+    "loadJsonInput", "exportPngBtn", "exportSvgBtn", "addProbandBtn", "addPersonBtn",
+    "addFatherBtn", "addMotherBtn", "addPartnerBtn", "addBrotherBtn", "addSisterBtn",
+    "addSonBtn", "addDaughterBtn", "autoLayoutBtn", "zoomInBtn", "zoomOutBtn", "resetViewBtn", "zoomLabel",
+    "optShowNumber", "optShowName", "optShowDiagnosis", "optShowAge", "optShowLegend",
+    "optShowTitle", "canvasArea", "canvasWrap", "pedigreeSvg", "statusLine",
+    "emptySelection", "personForm", "personName", "personSex", "personAffectedStatus",
+    "personAge", "personBirthYear", "personDeceased", "personProband",
+    "diagnosisSelect", "diagnosisTags", "personNotes", "setProbandBtn", "deletePersonBtn"
+  ];
+  ids.forEach((id) => (els[id] = document.getElementById(id)));
 }
 
 function bindEvents() {
-  els.newProjectBtn.addEventListener("click", newProject);
-  els.saveJsonBtn.addEventListener("click", saveProjectJson);
-  els.loadJsonInput.addEventListener("change", loadProjectJson);
-  els.exportPngBtn.addEventListener("click", exportPng);
+  els.addProbandBtn.addEventListener("click", addProband);
   els.addPersonBtn.addEventListener("click", () => addPerson());
-  els.setProbandBtn.addEventListener("click", setSelectedAsProband);
-  els.deletePersonBtn.addEventListener("click", deleteSelectedPerson);
   els.addFatherBtn.addEventListener("click", () => addParent("male"));
   els.addMotherBtn.addEventListener("click", () => addParent("female"));
   els.addPartnerBtn.addEventListener("click", addPartner);
-  els.addChildBtn.addEventListener("click", addChild);
-  els.addSiblingBtn.addEventListener("click", addSibling);
-  els.autoLayoutBtn.addEventListener("click", () => {
-    clearManualPositions();
-    autoLayout(true);
-    commitChange("已自动排版");
-  });
-  els.zoomInBtn.addEventListener("click", () => setZoom(state.scale + 0.12));
-  els.zoomOutBtn.addEventListener("click", () => setZoom(state.scale - 0.12));
-  els.resetViewBtn.addEventListener("click", resetView);
-  els.projectTitleInput.addEventListener("input", () => {
-    state.project.title = els.projectTitleInput.value.trim() || "未命名家系图";
-    commitChange("项目名称已更新", false);
-  });
+  els.addBrotherBtn.addEventListener("click", () => addSibling("male"));
+  els.addSisterBtn.addEventListener("click", () => addSibling("female"));
+  els.addSonBtn.addEventListener("click", () => addChild("male"));
+  els.addDaughterBtn.addEventListener("click", () => addChild("female"));
+  els.setProbandBtn.addEventListener("click", setSelectedAsProband);
+  els.deletePersonBtn.addEventListener("click", deleteSelected);
 
-  [
-    "personName", "personSex", "personAge", "personBirthYear",
-    "personAffectedStatus", "personNotes"
-  ].forEach((id) => {
-    els[id].addEventListener("input", updateSelectedFromForm);
-  });
+  els.autoLayoutBtn.addEventListener("click", () => { pushHistory(); autoLayout(); refresh(); fitView(); setStatus("已自动排版"); });
+  els.undoBtn.addEventListener("click", undo);
+  els.redoBtn.addEventListener("click", redo);
+  els.newProjectBtn.addEventListener("click", newProject);
+  els.saveJsonBtn.addEventListener("click", saveJson);
+  els.loadJsonInput.addEventListener("change", loadJson);
+  els.exportPngBtn.addEventListener("click", () => exportImage("png"));
+  els.exportSvgBtn.addEventListener("click", () => exportImage("svg"));
 
-  els.personDeceased.addEventListener("change", updateSelectedFromForm);
-  els.personProband.addEventListener("change", updateSelectedFromForm);
+  els.zoomInBtn.addEventListener("click", () => zoomBy(0.15));
+  els.zoomOutBtn.addEventListener("click", () => zoomBy(-0.15));
+  els.resetViewBtn.addEventListener("click", fitView);
+
+  ["optShowNumber", "optShowName", "optShowDiagnosis", "optShowAge", "optShowLegend", "optShowTitle"]
+    .forEach((id) => els[id].addEventListener("change", () => { syncSettings(); refresh(); }));
+
+  ["personName", "personAge", "personBirthYear", "personNotes"]
+    .forEach((id) => els[id].addEventListener("input", () => updateFromForm(false)));
+  ["personSex", "personAffectedStatus"].forEach((id) => els[id].addEventListener("change", () => updateFromForm(true)));
+  els.personDeceased.addEventListener("change", () => updateFromForm(false));
+  els.personProband.addEventListener("change", () => updateFromForm(false));
   els.diagnosisSelect.addEventListener("change", addDiagnosisFromSelect);
-  els.pedigreeSvg.addEventListener("pointermove", onPointerMove);
-  els.pedigreeSvg.addEventListener("pointerup", endDrag);
-  els.pedigreeSvg.addEventListener("pointerleave", endDrag);
-  els.canvasWrap.addEventListener("wheel", onCanvasWheel, { passive: false });
+
+  // 画布交互
+  els.pedigreeSvg.addEventListener("pointerdown", onCanvasPointerDown);
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+  els.canvasWrap.addEventListener("wheel", onWheel, { passive: false });
+
+  document.addEventListener("keydown", onKeyDown);
 }
 
+/* ============================================================
+   数据模型
+   ============================================================ */
 function createProject() {
   const now = new Date().toISOString();
   return {
-    version: "2.0",
-    title: "未命名家系图",
+    version: VERSION,
+    title: "家族谱系图",
     createdAt: now,
     updatedAt: now,
     people: [],
     relationships: [],
     settings: {
-      showNames: true,
-      showDiagnoses: true,
-      showLegend: true
-    },
-    viewport: {
-      scale: 1,
-      offsetX: 0,
-      offsetY: 0
+      showNumber: true, showName: true, showDiagnosis: true,
+      showAge: false, showLegend: true, showTitle: true
     }
   };
 }
 
 function makeId(prefix) {
-  return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
 function createPerson(overrides = {}) {
-  const index = state.project.people.length + 1;
+  const order = state.project.people.length + 1;
   return {
     id: makeId("p"),
-    name: overrides.name || `成员${index}`,
-    sex: overrides.sex || "unknown",
+    name: "",
+    sex: "unknown",
+    affectedStatus: "unaffected",
     age: "",
     birthYear: "",
-    affectedStatus: "unknown",
     diagnoses: [],
     deceased: false,
     proband: false,
     notes: "",
     x: 0,
     y: 0,
-    manualPosition: false,
-    layoutOrder: index,
+    order,
     ...overrides
   };
 }
 
-function addPerson(overrides = {}) {
-  const person = createPerson(overrides);
-  const wrap = els.canvasWrap.getBoundingClientRect();
-  person.x = (wrap.width / 2 - state.offsetX) / state.scale;
-  person.y = (wrap.height / 2 - state.offsetY) / state.scale;
-  state.project.people.push(person);
-  state.selectedPersonId = person.id;
-  if (state.project.people.length === 1) {
-    person.proband = true;
-    person.name = "先证者";
-  }
-  commitChange("已添加成员");
-  return person;
-}
-
-function addRelationship(relationship) {
-  state.project.relationships.push({
-    id: makeId("r"),
-    ...relationship
-  });
-}
-
-function selectedPerson() {
-  return state.project.people.find((person) => person.id === state.selectedPersonId) || null;
-}
+function getPerson(id) { return state.project.people.find((p) => p.id === id) || null; }
+function selectedPerson() { return getPerson(state.selectedId); }
 
 function requireSelection() {
-  const person = selectedPerson();
-  if (!person) {
-    setStatus("请先选择一个成员");
-    return null;
+  const p = selectedPerson();
+  if (!p) { setStatus("请先在画布中选择一个成员"); return null; }
+  return p;
+}
+
+function addRelationship(rel) { state.project.relationships.push({ id: makeId("r"), ...rel }); }
+
+function findParents(id) {
+  return state.project.relationships
+    .filter((r) => r.type === "parentChild" && r.child === id)
+    .map((r) => getPerson(r.parent)).filter(Boolean);
+}
+function findChildren(id) {
+  return state.project.relationships
+    .filter((r) => r.type === "parentChild" && r.parent === id)
+    .map((r) => getPerson(r.child)).filter(Boolean);
+}
+function findPartners(id) {
+  return state.project.relationships
+    .filter((r) => r.type === "partner" && (r.person1 === id || r.person2 === id))
+    .map((r) => getPerson(r.person1 === id ? r.person2 : r.person1)).filter(Boolean);
+}
+function hasPartner(a, b) {
+  return state.project.relationships.some((r) =>
+    r.type === "partner" && ((r.person1 === a && r.person2 === b) || (r.person1 === b && r.person2 === a)));
+}
+
+/* ============================================================
+   录入动作
+   ============================================================ */
+function addProband() {
+  if (state.project.people.some((p) => p.proband)) {
+    setStatus("已存在先证者，可在右侧勾选其他成员改设");
   }
-  return person;
+  pushHistory();
+  const p = createPerson({ name: "先证者", sex: "unknown", proband: !state.project.people.some((x) => x.proband) });
+  state.project.people.push(p);
+  state.selectedId = p.id;
+  autoLayout(); refresh(); fitView();
+  setStatus("已添加先证者");
+}
+
+function addPerson() {
+  pushHistory();
+  const p = createPerson({ name: "成员" });
+  if (state.project.people.length === 0) { p.proband = true; p.name = "先证者"; }
+  state.project.people.push(p);
+  state.selectedId = p.id;
+  autoLayout(); refresh(); fitView();
+  setStatus("已添加成员");
 }
 
 function addParent(sex) {
   const child = requireSelection();
   if (!child) return;
-  const basePersonId = child.id;
-  const parent = createPerson({
-    sex,
-    name: sex === "male" ? "父亲" : "母亲",
-    x: child.x + (sex === "male" ? -56 : 56),
-    y: child.y - GENERATION_GAP
-  });
+  const existing = findParents(child.id);
+  if (existing.some((p) => p.sex === sex)) { setStatus(sex === "male" ? "已存在父亲" : "已存在母亲"); return; }
+  if (existing.length >= 2) { setStatus("该成员已有两位父母"); return; }
+  pushHistory();
+  const parent = createPerson({ sex, name: sex === "male" ? "父" : "母" });
   state.project.people.push(parent);
   addRelationship({ type: "parentChild", parent: parent.id, child: child.id });
-  findParents(child.id)
-    .filter((existingParent) => existingParent.id !== parent.id)
-    .forEach((existingParent) => {
-      if (!hasPartnerRelationship(parent.id, existingParent.id)) {
-        addRelationship({ type: "partner", person1: parent.id, person2: existingParent.id, status: "current" });
-      }
-    });
-  state.selectedPersonId = basePersonId;
-  autoLayout(true);
-  commitChange(`已添加${sex === "male" ? "父亲" : "母亲"}`);
+  // 与已有的另一位父母自动建立配偶关系
+  existing.forEach((other) => { if (!hasPartner(parent.id, other.id)) addRelationship({ type: "partner", person1: parent.id, person2: other.id }); });
+  state.selectedId = child.id;
+  autoLayout(); refresh(); fitView();
+  setStatus(sex === "male" ? "已添加父亲" : "已添加母亲");
 }
 
 function addPartner() {
   const person = requireSelection();
   if (!person) return;
-  const basePersonId = person.id;
+  pushHistory();
   const partner = createPerson({
     name: "配偶",
-    sex: person.sex === "male" ? "female" : person.sex === "female" ? "male" : "unknown",
-    x: person.x + PERSON_GAP,
-    y: person.y
+    sex: person.sex === "male" ? "female" : person.sex === "female" ? "male" : "unknown"
   });
   state.project.people.push(partner);
-  addRelationship({ type: "partner", person1: person.id, person2: partner.id, status: "current" });
-  state.selectedPersonId = basePersonId;
-  autoLayout(true);
-  commitChange("已添加配偶");
+  addRelationship({ type: "partner", person1: person.id, person2: partner.id });
+  state.selectedId = person.id;
+  autoLayout(); refresh(); fitView();
+  setStatus("已添加配偶");
 }
 
-function addChild() {
+function addChild(sex) {
   const parent = requireSelection();
   if (!parent) return;
-  const basePersonId = parent.id;
-  const child = createPerson({
-    name: "子女",
-    x: parent.x,
-    y: parent.y + GENERATION_GAP
-  });
+  pushHistory();
+  const label = sex === "male" ? "儿子" : sex === "female" ? "女儿" : "子女";
+  const child = createPerson({ name: label, sex: sex || "unknown" });
   state.project.people.push(child);
   addRelationship({ type: "parentChild", parent: parent.id, child: child.id });
   const partner = findPartners(parent.id)[0];
-  if (partner) {
-      addRelationship({ type: "parentChild", parent: partner.id, child: child.id });
-  }
-  state.selectedPersonId = basePersonId;
-  autoLayout(true);
-  commitChange("已添加子女");
+  if (partner) addRelationship({ type: "parentChild", parent: partner.id, child: child.id });
+  state.selectedId = parent.id; // 光标保持在父/母，便于连续添加
+  autoLayout(); refresh(); fitView();
+  setStatus(`已添加${label}`);
 }
 
-function addSibling() {
+function addSibling(sex) {
   const person = requireSelection();
   if (!person) return;
-  const basePersonId = person.id;
-  const sibling = createPerson({
-    name: "兄弟姐妹",
-    sex: "unknown",
-    x: person.x + PERSON_GAP,
-    y: person.y
-  });
-  state.project.people.push(sibling);
   const parents = findParents(person.id);
-  parents.forEach((parent) => {
-    addRelationship({ type: "parentChild", parent: parent.id, child: sibling.id });
-  });
-  state.selectedPersonId = basePersonId;
-  autoLayout(true);
-  commitChange("已添加兄弟姐妹");
+  pushHistory();
+  const label = sex === "male" ? "兄弟" : sex === "female" ? "姐妹" : "同胞";
+  const sib = createPerson({ name: label, sex: sex || "unknown" });
+  state.project.people.push(sib);
+  if (parents.length === 0) {
+    // 自动补一对未知父母，保证同胞共享父母
+    const dad = createPerson({ sex: "male", name: "父" });
+    const mom = createPerson({ sex: "female", name: "母" });
+    state.project.people.push(dad, mom);
+    addRelationship({ type: "partner", person1: dad.id, person2: mom.id });
+    [person, sib].forEach((c) => { addRelationship({ type: "parentChild", parent: dad.id, child: c.id }); addRelationship({ type: "parentChild", parent: mom.id, child: c.id }); });
+    setStatus(`已添加${label}并自动补充父母`);
+  } else {
+    parents.forEach((p) => addRelationship({ type: "parentChild", parent: p.id, child: sib.id }));
+    setStatus(`已添加${label}`);
+  }
+  state.selectedId = person.id; // 光标保持在原成员，不随新同胞变更
+  autoLayout(); refresh(); fitView();
 }
 
-function deleteSelectedPerson() {
-  const person = requireSelection();
-  if (!person) return;
-  state.project.people = state.project.people.filter((item) => item.id !== person.id);
-  state.project.relationships = state.project.relationships.filter((rel) => !relationshipHasPerson(rel, person.id));
-  state.selectedPersonId = null;
-  commitChange("已删除成员");
-}
-
-function relationshipHasPerson(rel, id) {
-  return rel.parent === id || rel.child === id || rel.person1 === id || rel.person2 === id;
-}
-
-function hasPartnerRelationship(idA, idB) {
-  return state.project.relationships.some((rel) => {
-    if (rel.type !== "partner") return false;
-    return (rel.person1 === idA && rel.person2 === idB) || (rel.person1 === idB && rel.person2 === idA);
-  });
+function deleteSelected() {
+  const p = requireSelection();
+  if (!p) return;
+  pushHistory();
+  state.project.people = state.project.people.filter((x) => x.id !== p.id);
+  state.project.relationships = state.project.relationships.filter((r) =>
+    r.parent !== p.id && r.child !== p.id && r.person1 !== p.id && r.person2 !== p.id);
+  state.selectedId = null;
+  autoLayout(); refresh(); fitView();
+  setStatus("已删除成员");
 }
 
 function setSelectedAsProband() {
-  const person = requireSelection();
-  if (!person) return;
-  state.project.people.forEach((item) => {
-    item.proband = item.id === person.id;
-  });
-  commitChange("已设置先证者");
+  const p = requireSelection();
+  if (!p) return;
+  pushHistory();
+  state.project.people.forEach((x) => (x.proband = x.id === p.id));
+  refresh();
+  setStatus("已设置先证者");
 }
 
-function updateSelectedFromForm() {
-  const person = selectedPerson();
-  if (!person) return;
-  person.name = els.personName.value.trim() || "未命名";
-  person.sex = els.personSex.value;
-  person.age = els.personAge.value.trim();
-  person.birthYear = els.personBirthYear.value.trim();
-  person.affectedStatus = els.personAffectedStatus.value;
-  person.deceased = els.personDeceased.checked;
-  person.notes = els.personNotes.value;
-  if (els.personProband.checked) {
-    state.project.people.forEach((item) => {
-      item.proband = item.id === person.id;
-    });
-  } else {
-    person.proband = false;
-  }
-  commitChange("成员属性已更新", false);
+function updateFromForm(relayout) {
+  const p = selectedPerson();
+  if (!p) return;
+  p.name = els.personName.value;
+  p.sex = els.personSex.value;
+  p.affectedStatus = els.personAffectedStatus.value;
+  p.age = els.personAge.value.trim();
+  p.birthYear = els.personBirthYear.value.trim();
+  p.deceased = els.personDeceased.checked;
+  p.notes = els.personNotes.value;
+  if (els.personProband.checked) state.project.people.forEach((x) => (x.proband = x.id === p.id));
+  else p.proband = false;
+  if (relayout) { autoLayout(); }
+  refresh();
+  autosave();
 }
 
 function addDiagnosisFromSelect() {
-  const person = selectedPerson();
-  const value = els.diagnosisSelect.value;
-  if (!person || !value) return;
-  if (!person.diagnoses.includes(value)) {
-    person.diagnoses.push(value);
-  }
+  const p = selectedPerson();
+  const v = els.diagnosisSelect.value;
+  if (!p || !v) return;
+  if (!p.diagnoses.includes(v)) p.diagnoses.push(v);
   els.diagnosisSelect.value = "";
-  commitChange("诊断标签已更新");
-}
-
-function removeDiagnosis(value) {
-  const person = selectedPerson();
-  if (!person) return;
-  person.diagnoses = person.diagnoses.filter((item) => item !== value);
-  commitChange("诊断标签已移除");
-}
-
-function commitChange(message, rerender = true) {
-  state.project.updatedAt = new Date().toISOString();
-  state.project.viewport = {
-    scale: state.scale,
-    offsetX: state.offsetX,
-    offsetY: state.offsetY
-  };
+  refresh();
   autosave();
-  updateControls();
-  if (rerender) {
-    renderAll();
-  } else {
-    renderAll();
-  }
-  setStatus(message);
+}
+function removeDiagnosis(v) {
+  const p = selectedPerson();
+  if (!p) return;
+  p.diagnoses = p.diagnoses.filter((d) => d !== v);
+  refresh();
+  autosave();
 }
 
-function updateControls() {
-  const hasSelection = Boolean(selectedPerson());
-  [
-    els.setProbandBtn, els.deletePersonBtn, els.addFatherBtn, els.addMotherBtn,
-    els.addPartnerBtn, els.addChildBtn, els.addSiblingBtn
-  ].forEach((button) => {
-    button.disabled = !hasSelection;
+/* ============================================================
+   世代计算（最长路径分层：祖辈在上，子辈在下）
+   ============================================================ */
+function computeGenerations() {
+  const gen = new Map();
+  state.project.people.forEach((p) => gen.set(p.id, 0));
+  const pcs = state.project.relationships.filter((r) => r.type === "parentChild");
+  const partners = state.project.relationships.filter((r) => r.type === "partner");
+  const limit = state.project.people.length + 5;
+  for (let i = 0; i < limit; i++) {
+    let changed = false;
+    pcs.forEach((r) => {
+      if (!gen.has(r.parent) || !gen.has(r.child)) return;
+      const g = gen.get(r.parent) + 1;
+      if (g > gen.get(r.child)) { gen.set(r.child, g); changed = true; }
+    });
+    partners.forEach((r) => {
+      if (!gen.has(r.person1) || !gen.has(r.person2)) return;
+      const m = Math.max(gen.get(r.person1), gen.get(r.person2));
+      if (gen.get(r.person1) !== m) { gen.set(r.person1, m); changed = true; }
+      if (gen.get(r.person2) !== m) { gen.set(r.person2, m); changed = true; }
+    });
+    if (!changed) break;
+  }
+  return gen;
+}
+
+/* ============================================================
+   家庭单元（用于渲染连线）
+   ============================================================ */
+function orderCouple(aId, bId) {
+  // 男左女右；其余按创建顺序
+  const a = getPerson(aId), b = getPerson(bId);
+  if (!a || !b) return [aId, bId];
+  if (a.sex === "male" && b.sex !== "male") return [aId, bId];
+  if (b.sex === "male" && a.sex !== "male") return [bId, aId];
+  if (a.sex === "female" && b.sex !== "female") return [bId, aId];
+  if (b.sex === "female" && a.sex !== "female") return [aId, bId];
+  return a.order <= b.order ? [aId, bId] : [bId, aId];
+}
+
+function coupleKey(ids) { return [...ids].sort().join("|"); }
+
+function collectFamilyUnits() {
+  const groups = new Map();
+  state.project.people.forEach((child) => {
+    const parents = findParents(child.id);
+    if (parents.length === 0) return;
+    let parentIds;
+    if (parents.length >= 2) {
+      const male = parents.find((p) => p.sex === "male");
+      const female = parents.find((p) => p.sex === "female");
+      parentIds = (male && female) ? [male.id, female.id] : [parents[0].id, parents[1].id];
+    } else {
+      parentIds = [parents[0].id];
+    }
+    const key = coupleKey(parentIds);
+    if (!groups.has(key)) groups.set(key, { parentIds, children: [] });
+    groups.get(key).children.push(child);
   });
-  els.projectTitleInput.value = state.project.title;
-  els.projectMeta.textContent = `${state.project.title} · ${state.project.people.length} 名成员`;
+  return [...groups.values()].map((u) => ({
+    parentIds: u.parentIds.length === 2 ? orderCouple(u.parentIds[0], u.parentIds[1]) : u.parentIds,
+    children: u.children.sort((a, b) => a.order - b.order)
+  }));
+}
+
+/* ============================================================
+   可靠的递归自动排版（family-forest tidy tree）
+   ============================================================ */
+/*
+  排版采用「节点级重心法」(layered barycenter)：
+  - 把每对配偶合并为一个夫妻超级节点，单身者为单节点；
+  - 按代际分层，节点之间用父代/子代重心反复排序，再顺序打包（天然无重叠）；
+  - 由于夫妻节点可同时挂在双方父母之下，双方的兄弟姐妹会被分别排到夫妻两侧，
+    从而避免「父母双方的兄弟姐妹连线相互交叉」的问题；
+  - 最后自底向上把父母对齐到子女重心，保证下降竖线对准同胞横线中点。
+*/
+function autoLayout() {
+  const people = state.project.people;
+  if (people.length === 0) return;
+  const gen = computeGenerations();
+  state.genMap = gen;
+
+  const SUB_GAP = PERSON_GAP * 0.35;
+  const singleW = PERSON_GAP;
+  const coupleW = PERSON_GAP * 2;
+
+  /* 1. 构建节点：夫妻超级节点 or 单节点 */
+  const nodeOf = new Map();
+  const nodes = [];
+  const assigned = new Set();
+  people.forEach((p) => {
+    if (assigned.has(p.id)) return;
+    const partner = findPartners(p.id).find((q) => !assigned.has(q.id));
+    if (partner) {
+      const [l, r] = orderCouple(p.id, partner.id);
+      const node = { members: [l, r], gen: gen.get(l), cx: 0, width: coupleW };
+      nodes.push(node); nodeOf.set(l, node); nodeOf.set(r, node);
+      assigned.add(l); assigned.add(r);
+    } else {
+      const node = { members: [p.id], gen: gen.get(p.id), cx: 0, width: singleW };
+      nodes.push(node); nodeOf.set(p.id, node); assigned.add(p.id);
+    }
+  });
+
+  /* 2. 节点级父子边（去重，允许一个节点有多个父节点） */
+  const parentsOf = new Map(); nodes.forEach((n) => parentsOf.set(n, new Set()));
+  const childrenOf = new Map(); nodes.forEach((n) => childrenOf.set(n, new Set()));
+  state.project.relationships.filter((r) => r.type === "parentChild").forEach((r) => {
+    const pn = nodeOf.get(r.parent), cn = nodeOf.get(r.child);
+    if (pn && cn && pn !== cn) { parentsOf.get(cn).add(pn); childrenOf.get(pn).add(cn); }
+  });
+
+  /* 3. 分代 */
+  const maxGen = Math.max(...nodes.map((n) => n.gen));
+  const genNodes = [];
+  for (let g = 0; g <= maxGen; g++) genNodes[g] = [];
+  nodes.forEach((n) => genNodes[n.gen].push(n));
+  const baseOrder = (n) => Math.min(...n.members.map((id) => getPerson(id).order));
+  genNodes.forEach((arr) => arr.sort((a, b) => baseOrder(a) - baseOrder(b)));
+
+  const pack = (g) => {
+    let x = 0;
+    genNodes[g].forEach((n) => { n.cx = x + n.width / 2; x += n.width + SUB_GAP; });
+    // 将该代整体居中到 0，使各代坐标可跨代比较（重心法的前提）
+    const m = avg(genNodes[g].map((n) => n.cx));
+    genNodes[g].forEach((n) => { n.cx -= m; });
+  };
+  const baryParents = (n) => { const a = [...parentsOf.get(n)]; return a.length ? avg(a.map((p) => p.cx)) : null; };
+  const baryChildren = (n) => { const a = [...childrenOf.get(n)]; return a.length ? avg(a.map((c) => c.cx)) : null; };
+
+  for (let g = 0; g <= maxGen; g++) pack(g);
+
+  // 夫妻节点向其血缘一侧轻微偏置：让该成员的兄弟姐妹排到该成员的外侧，
+  // 避免「同胞连线穿过配偶」（如先证者同时有配偶和同胞时）。
+  const SIDE_BIAS = 0.5;
+  const sideBias = (n) => {
+    if (n.members.length !== 2) return 0;
+    const [l, r] = n.members;
+    const lp = findParents(l).length > 0, rp = findParents(r).length > 0;
+    if (lp && !rp) return SIDE_BIAS;   // 血缘在左 → 夫妻排到其同胞右侧
+    if (rp && !lp) return -SIDE_BIAS;  // 血缘在右 → 夫妻排到其同胞左侧
+    return 0;
+  };
+  const keyDown = (n) => (baryParents(n) == null ? n.cx : baryParents(n)) + sideBias(n);
+  const keyUp = (n) => (baryChildren(n) == null ? n.cx : baryChildren(n)) + sideBias(n);
+
+  /* 4. 重心迭代：下行按父代重心、上行按子代重心，反复排序+打包 */
+  for (let iter = 0; iter < 6; iter++) {
+    for (let g = 1; g <= maxGen; g++) { genNodes[g].sort((a, b) => keyDown(a) - keyDown(b) || baseOrder(a) - baseOrder(b)); pack(g); }
+    for (let g = maxGen - 1; g >= 0; g--) { genNodes[g].sort((a, b) => keyUp(a) - keyUp(b) || baseOrder(a) - baseOrder(b)); pack(g); }
+  }
+
+  /* 5. 固定步骤4确定的左右顺序，先按序均匀打包，再做带约束的重心松弛：
+        每个节点向「父代+子代重心」靠拢，但被左右相邻节点夹住，既对中又不重叠、不改顺序。 */
+  for (let g = 0; g <= maxGen; g++) pack(g);
+  const minGap = (a, b) => a.width / 2 + SUB_GAP + b.width / 2;
+  for (let iter = 0; iter < 10; iter++) {
+    for (let g = 0; g <= maxGen; g++) {
+      const arr = genNodes[g];
+      for (let i = 0; i < arr.length; i++) {
+        const n = arr[i];
+        const bp = baryParents(n), bc = baryChildren(n);
+        let target = null;
+        if (bp != null && bc != null) target = (bp + bc) / 2;
+        else if (bp != null) target = bp;
+        else if (bc != null) target = bc;
+        if (target == null) continue;
+        const lo = i > 0 ? arr[i - 1].cx + minGap(arr[i - 1], n) : -Infinity;
+        const hi = i < arr.length - 1 ? arr[i + 1].cx - minGap(n, arr[i + 1]) : Infinity;
+        n.cx = clamp(target, lo, hi);
+      }
+    }
+  }
+
+  /* 6. 写回成员坐标 */
+  nodes.forEach((n) => {
+    const y = n.gen * GENERATION_GAP;
+    if (n.members.length === 2) {
+      const [l, r] = n.members;
+      getPerson(l).x = n.cx - PERSON_GAP / 2; getPerson(l).y = y;
+      getPerson(r).x = n.cx + PERSON_GAP / 2; getPerson(r).y = y;
+    } else {
+      const p = getPerson(n.members[0]);
+      p.x = n.cx; p.y = y;
+    }
+  });
+
+  resolveOverlaps(gen);
+  normalizeToOrigin();
+  computeNumbering(gen);
+}
+
+function resolveOverlaps(gen) {
+  const rows = new Map();
+  state.project.people.forEach((p) => {
+    const g = gen.get(p.id) ?? 0;
+    if (!rows.has(g)) rows.set(g, []);
+    rows.get(g).push(p);
+  });
+  rows.forEach((row) => {
+    row.sort((a, b) => a.x - b.x || a.order - b.order);
+    const minGap = PERSON_GAP * 0.96;
+    for (let i = 1; i < row.length; i++) {
+      const gapNeed = row[i - 1].x + minGap;
+      if (row[i].x < gapNeed) {
+        const shift = gapNeed - row[i].x;
+        row[i].x += shift; // 仅右推当前，避免破坏左侧已对齐的家庭
+      }
+    }
+  });
+}
+
+function normalizeToOrigin() {
+  const xs = state.project.people.map((p) => p.x);
+  const ys = state.project.people.map((p) => p.y);
+  if (xs.length === 0) return;
+  const minX = Math.min(...xs), minY = Math.min(...ys);
+  const padX = 120, padY = 120;
+  state.project.people.forEach((p) => { p.x = p.x - minX + padX; p.y = p.y - minY + padY; });
+}
+
+function computeNumbering(gen) {
+  const map = new Map();
+  const rows = new Map();
+  state.project.people.forEach((p) => {
+    const g = gen.get(p.id) ?? 0;
+    if (!rows.has(g)) rows.set(g, []);
+    rows.get(g).push(p);
+  });
+  [...rows.keys()].sort((a, b) => a - b).forEach((g, gi) => {
+    rows.get(g).sort((a, b) => a.x - b.x || a.order - b.order).forEach((p, pi) => {
+      map.set(p.id, `${roman(gi + 1)}-${pi + 1}`);
+    });
+  });
+  state.numberMap = map;
+}
+
+function roman(n) {
+  const t = [["X", 10], ["IX", 9], ["V", 5], ["IV", 4], ["I", 1]];
+  let r = "", x = n;
+  t.forEach(([s, v]) => { while (x >= v) { r += s; x -= v; } });
+  return r || "I";
+}
+
+/* ============================================================
+   渲染
+   ============================================================ */
+function svgEl(tag, attrs = {}, text) {
+  const n = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs) n.setAttribute(k, String(attrs[k]));
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function refresh(doAutosave = true) {
+  syncHeader();
   renderForm();
+  renderSvg();
+  updateButtons();
+  if (doAutosave) autosave();
+}
+
+function renderSvg() {
+  const svg = els.pedigreeSvg;
+  svg.innerHTML = "";
+  const rect = els.canvasWrap.getBoundingClientRect();
+  const W = Math.max(rect.width, 600), H = Math.max(rect.height, 400);
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.appendChild(buildDefs());
+
+  const root = svgEl("g", { transform: `translate(${state.offsetX},${state.offsetY}) scale(${state.scale})` });
+  svg.appendChild(root);
+
+  if (state.project.people.length === 0) {
+    root.appendChild(svgEl("text", { x: W / 2, y: H / 2, class: "empty-canvas-text" }, "点击左侧「添加先证者」开始绘制"));
+    return;
+  }
+
+  const s = state.project.settings;
+  drawGenerationLabels(root);
+  drawRelationships(root);
+  state.project.people.forEach((p) => drawPerson(root, p));
+  if (s.showTitle) drawTitle(root);
+  if (s.showLegend) drawLegend(root);
+}
+
+function buildDefs() {
+  const defs = svgEl("defs");
+  const pat = svgEl("pattern", { id: "suspectedPattern", width: 7, height: 7, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" });
+  pat.appendChild(svgEl("rect", { width: 7, height: 7, fill: "#fff" }));
+  pat.appendChild(svgEl("rect", { width: 3.5, height: 7, fill: "#2f3a42" }));
+  defs.appendChild(pat);
+  const mk = svgEl("marker", { id: "arrow", markerWidth: 9, markerHeight: 9, refX: 7, refY: 3, orient: "auto", markerUnits: "strokeWidth" });
+  mk.appendChild(svgEl("path", { d: "M0,0 L0,6 L8,3 z", fill: "#2f3a42" }));
+  defs.appendChild(mk);
+  return defs;
+}
+
+function drawGenerationLabels(root) {
+  const gen = state.genMap;
+  const rows = new Map();
+  state.project.people.forEach((p) => {
+    const g = gen.get(p.id) ?? 0;
+    if (!rows.has(g)) rows.set(g, []);
+    rows.get(g).push(p);
+  });
+  const minX = Math.min(...state.project.people.map((p) => p.x));
+  [...rows.keys()].sort((a, b) => a - b).forEach((g, gi) => {
+    const y = avg(rows.get(g).map((p) => p.y));
+    root.appendChild(svgEl("text", { x: minX - 70, y, class: "generation-label" }, roman(gi + 1)));
+  });
+}
+
+function drawRelationships(root) {
+  const units = collectFamilyUnits();
+  const twoParentChildren = new Set(units.filter((u) => u.parentIds.length === 2).flatMap((u) => u.children.map((c) => c.id)));
+
+  // 配偶线
+  state.project.relationships.filter((r) => r.type === "partner").forEach((r) => {
+    const a = getPerson(r.person1), b = getPerson(r.person2);
+    if (!a || !b) return;
+    const y = (a.y + b.y) / 2;
+    root.appendChild(svgEl("line", { x1: Math.min(a.x, b.x) + R, y1: y, x2: Math.max(a.x, b.x) - R, y2: y, class: "marriage-line" }));
+  });
+
+  // 双亲家庭：下降线 + 同胞横线 + 个体线
+  units.filter((u) => u.parentIds.length === 2).forEach((u) => {
+    const pa = getPerson(u.parentIds[0]), pb = getPerson(u.parentIds[1]);
+    if (!pa || !pb) return;
+    const midX = (pa.x + pb.x) / 2;
+    const marriageY = (pa.y + pb.y) / 2;
+    const childTopY = Math.min(...u.children.map((c) => c.y)) - R;
+    const sibY = childTopY - SIBSHIP_DROP + R;
+    root.appendChild(svgEl("line", { x1: midX, y1: marriageY, x2: midX, y2: sibY, class: "descent-line" }));
+    const xs = u.children.map((c) => c.x);
+    if (u.children.length > 1) {
+      root.appendChild(svgEl("line", { x1: Math.min(...xs), y1: sibY, x2: Math.max(...xs), y2: sibY, class: "sibling-line" }));
+    }
+    u.children.forEach((c) => root.appendChild(svgEl("line", { x1: c.x, y1: sibY, x2: c.x, y2: c.y - R, class: "individual-line" })));
+  });
+
+  // 单亲家庭
+  units.filter((u) => u.parentIds.length === 1).forEach((u) => {
+    const parent = getPerson(u.parentIds[0]);
+    if (!parent) return;
+    const childTopY = Math.min(...u.children.map((c) => c.y)) - R;
+    const sibY = childTopY - SIBSHIP_DROP + R;
+    root.appendChild(svgEl("line", { x1: parent.x, y1: parent.y + R, x2: parent.x, y2: sibY, class: "descent-line" }));
+    const xs = u.children.map((c) => c.x);
+    if (u.children.length > 1) {
+      root.appendChild(svgEl("line", { x1: Math.min(...xs), y1: sibY, x2: Math.max(...xs), y2: sibY, class: "sibling-line" }));
+    }
+    u.children.forEach((c) => root.appendChild(svgEl("line", { x1: c.x, y1: sibY, x2: c.x, y2: c.y - R, class: "individual-line" })));
+  });
+}
+
+function drawPerson(root, p) {
+  const g = svgEl("g", { class: "node-hit", "data-id": p.id });
+  const s = state.project.settings;
+
+  // 先证者箭头（左下指向符号）
+  if (p.proband) {
+    const ax = p.x - R - 26, ay = p.y + R + 26;
+    g.appendChild(svgEl("line", { x1: ax, y1: ay, x2: p.x - R * 0.78, y2: p.y + R * 0.78, class: "proband-arrow", "marker-end": "url(#arrow)" }));
+    g.appendChild(svgEl("text", { x: ax - 4, y: ay + 12, class: "proband-label" }, "P"));
+  }
+
+  // 选中环
+  if (state.selectedId === p.id) {
+    g.appendChild(svgEl("rect", { x: p.x - R - 8, y: p.y - R - 8, width: NODE_SIZE + 16, height: NODE_SIZE + 16, rx: 8, class: "selected-ring" }));
+  }
+
+  const cls = `person-symbol ${p.affectedStatus || "unaffected"}`;
+  if (p.sex === "female") {
+    g.appendChild(svgEl("circle", { cx: p.x, cy: p.y, r: R, class: cls }));
+  } else if (p.sex === "male") {
+    g.appendChild(svgEl("rect", { x: p.x - R, y: p.y - R, width: NODE_SIZE, height: NODE_SIZE, class: cls }));
+  } else {
+    g.appendChild(svgEl("polygon", { points: `${p.x},${p.y - R} ${p.x + R},${p.y} ${p.x},${p.y + R} ${p.x - R},${p.y}`, class: cls }));
+  }
+
+  if (p.deceased) {
+    g.appendChild(svgEl("line", { x1: p.x - R * 1.25, y1: p.y + R * 1.25, x2: p.x + R * 1.25, y2: p.y - R * 1.25, class: "deceased-line" }));
+  }
+
+  // 世代编号（符号左上角，避开顶部下降竖线）
+  if (s.showNumber) {
+    g.appendChild(svgEl("text", { x: p.x - R - 5, y: p.y - R + 2, class: "id-label" }, state.numberMap.get(p.id) || ""));
+  }
+
+  // 名称 / 年龄 / 诊断（符号下方依次堆叠）
+  let ty = p.y + LABEL_OFFSET;
+  if (s.showName && p.name) { g.appendChild(svgEl("text", { x: p.x, y: ty, class: "person-label" }, p.name)); ty += 15; }
+  if (s.showAge) {
+    const meta = [p.age && `${p.age}岁`, p.birthYear && `b.${p.birthYear}`].filter(Boolean).join(" ");
+    if (meta) { g.appendChild(svgEl("text", { x: p.x, y: ty, class: "meta-label" }, meta)); ty += 14; }
+  }
+  if (s.showDiagnosis && p.diagnoses.length) {
+    p.diagnoses.slice(0, 3).forEach((d) => { g.appendChild(svgEl("text", { x: p.x, y: ty, class: "diagnosis-label" }, d)); ty += 14; });
+  }
+
+  root.appendChild(g);
+}
+
+function drawTitle(root) {
+  const b = contentBounds();
+  root.appendChild(svgEl("text", { x: (b.minX + b.maxX) / 2, y: b.minY - 56, class: "title-text" }, state.project.title || "家族谱系图"));
+}
+
+function drawLegend(root) {
+  const b = contentBounds();
+  const x = b.maxX + 56;
+  const y = b.minY;
+  const rowH = 30;
+  const items = [
+    { kind: "rect", fill: "#fff", text: "男性 · 未患病" },
+    { kind: "circle", fill: "#fff", text: "女性 · 未患病" },
+    { kind: "diamond", fill: "#e2e8ec", text: "性别未知" },
+    { kind: "rect", fill: "#2f3a42", text: "患病" },
+    { kind: "rect", fill: "url(#suspectedPattern)", text: "疑似" },
+    { kind: "deceased", text: "已故（／）" },
+    { kind: "proband", text: "先证者（箭头 P）" }
+  ];
+  const boxW = 188, boxH = items.length * rowH + 36;
+  const g = svgEl("g");
+  g.appendChild(svgEl("rect", { x, y, width: boxW, height: boxH, rx: 8, class: "legend-box" }));
+  g.appendChild(svgEl("text", { x: x + 14, y: y + 24, class: "legend-title" }, "图例"));
+  items.forEach((it, i) => {
+    const cy = y + 48 + i * rowH;
+    const sx = x + 24;
+    const r = 9;
+    if (it.kind === "rect") g.appendChild(svgEl("rect", { x: sx - r, y: cy - r, width: r * 2, height: r * 2, fill: it.fill, stroke: "#2f3a42", "stroke-width": 2 }));
+    else if (it.kind === "circle") g.appendChild(svgEl("circle", { cx: sx, cy, r, fill: it.fill, stroke: "#2f3a42", "stroke-width": 2 }));
+    else if (it.kind === "diamond") g.appendChild(svgEl("polygon", { points: `${sx},${cy - r} ${sx + r},${cy} ${sx},${cy + r} ${sx - r},${cy}`, fill: it.fill, stroke: "#2f3a42", "stroke-width": 2 }));
+    else if (it.kind === "deceased") {
+      g.appendChild(svgEl("rect", { x: sx - r, y: cy - r, width: r * 2, height: r * 2, fill: "#fff", stroke: "#2f3a42", "stroke-width": 2 }));
+      g.appendChild(svgEl("line", { x1: sx - r - 3, y1: cy + r + 3, x2: sx + r + 3, y2: cy - r - 3, stroke: "#2f3a42", "stroke-width": 2 }));
+    } else if (it.kind === "proband") {
+      g.appendChild(svgEl("rect", { x: sx - r, y: cy - r, width: r * 2, height: r * 2, fill: "#fff", stroke: "#2f3a42", "stroke-width": 2 }));
+      g.appendChild(svgEl("line", { x1: sx - r - 12, y1: cy + r + 8, x2: sx - r + 1, y2: cy + r - 1, stroke: "#2f3a42", "stroke-width": 2, "marker-end": "url(#arrow)" }));
+    }
+    g.appendChild(svgEl("text", { x: x + 44, y: cy, class: "legend-text" }, it.text));
+  });
+  root.appendChild(g);
+}
+
+function contentBounds() {
+  const people = state.project.people;
+  if (people.length === 0) return { minX: 0, minY: 0, maxX: 600, maxY: 400, width: 600, height: 400 };
+  const xs = people.map((p) => p.x), ys = people.map((p) => p.y);
+  return {
+    minX: Math.min(...xs), minY: Math.min(...ys),
+    maxX: Math.max(...xs), maxY: Math.max(...ys),
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys)
+  };
+}
+
+/* ============================================================
+   头部 / 表单 / 按钮状态
+   ============================================================ */
+function syncHeader() {
+  els.projectMeta.textContent = `${state.project.title} · ${state.project.people.length} 名成员`;
+}
+
+function syncSettings() {
+  const s = state.project.settings;
+  s.showNumber = els.optShowNumber.checked;
+  s.showName = els.optShowName.checked;
+  s.showDiagnosis = els.optShowDiagnosis.checked;
+  s.showAge = els.optShowAge.checked;
+  s.showLegend = els.optShowLegend.checked;
+  s.showTitle = els.optShowTitle.checked;
+  autosave();
+}
+
+function applySettingsToUI() {
+  const s = state.project.settings;
+  els.optShowNumber.checked = s.showNumber;
+  els.optShowName.checked = s.showName;
+  els.optShowDiagnosis.checked = s.showDiagnosis;
+  els.optShowAge.checked = s.showAge;
+  els.optShowLegend.checked = s.showLegend;
+  els.optShowTitle.checked = s.showTitle;
 }
 
 function renderForm() {
-  const person = selectedPerson();
-  els.emptySelection.hidden = Boolean(person);
-  els.personForm.hidden = !person;
-  if (!person) return;
-  els.personName.value = person.name || "";
-  els.personSex.value = person.sex || "unknown";
-  els.personAge.value = person.age || "";
-  els.personBirthYear.value = person.birthYear || "";
-  els.personAffectedStatus.value = person.affectedStatus || "unknown";
-  els.personDeceased.checked = Boolean(person.deceased);
-  els.personProband.checked = Boolean(person.proband);
-  els.personNotes.value = person.notes || "";
+  const p = selectedPerson();
+  els.emptySelection.hidden = Boolean(p);
+  els.personForm.hidden = !p;
+  if (!p) return;
+  els.personName.value = p.name || "";
+  els.personSex.value = p.sex || "unknown";
+  els.personAffectedStatus.value = p.affectedStatus || "unaffected";
+  els.personAge.value = p.age || "";
+  els.personBirthYear.value = p.birthYear || "";
+  els.personDeceased.checked = !!p.deceased;
+  els.personProband.checked = !!p.proband;
+  els.personNotes.value = p.notes || "";
   els.diagnosisTags.innerHTML = "";
-  person.diagnoses.forEach((diagnosis) => {
+  p.diagnoses.forEach((d) => {
     const tag = document.createElement("span");
     tag.className = "tag";
-    tag.textContent = diagnosis;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = "x";
-    button.title = "移除诊断";
-    button.addEventListener("click", () => removeDiagnosis(diagnosis));
-    tag.appendChild(button);
+    tag.textContent = d;
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.textContent = "×";
+    btn.addEventListener("click", () => removeDiagnosis(d));
+    tag.appendChild(btn);
     els.diagnosisTags.appendChild(tag);
   });
 }
 
-function renderAll() {
-  const svg = els.pedigreeSvg;
-  svg.innerHTML = "";
-  const wrap = els.canvasWrap.getBoundingClientRect();
-  svg.setAttribute("viewBox", `0 0 ${Math.max(wrap.width, 800)} ${Math.max(wrap.height, 560)}`);
-  svg.appendChild(createDefs());
-
-  const graph = svgEl("g", {
-    transform: `translate(${state.offsetX}, ${state.offsetY}) scale(${state.scale})`
-  });
-  svg.appendChild(graph);
-
-  if (state.project.people.length === 0) {
-    graph.appendChild(svgEl("text", {
-      x: Math.max(wrap.width, 800) / 2,
-      y: Math.max(wrap.height, 560) / 2,
-      class: "empty-canvas-text"
-    }, "点击左侧“添加成员”开始"));
-    return;
-  }
-
-  renderGenerationLabels(graph);
-  renderRelationships(graph);
-  state.project.people.forEach((person) => renderPerson(graph, person));
+function updateButtons() {
+  const has = Boolean(selectedPerson());
+  [els.addFatherBtn, els.addMotherBtn, els.addPartnerBtn, els.addBrotherBtn, els.addSisterBtn, els.addSonBtn, els.addDaughterBtn]
+    .forEach((b) => (b.disabled = !has));
+  els.undoBtn.disabled = state.history.length === 0;
+  els.redoBtn.disabled = state.future.length === 0;
+  els.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
 }
 
-function createDefs() {
-  const defs = svgEl("defs");
-  const pattern = svgEl("pattern", {
-    id: "suspectedPattern",
-    width: 8,
-    height: 8,
-    patternUnits: "userSpaceOnUse",
-    patternTransform: "rotate(45)"
-  });
-  pattern.appendChild(svgEl("rect", { width: 8, height: 8, fill: "#fff" }));
-  pattern.appendChild(svgEl("rect", { width: 4, height: 8, fill: "#2f3a42" }));
-  defs.appendChild(pattern);
-
-  const marker = svgEl("marker", {
-    id: "arrowHead",
-    markerWidth: 10,
-    markerHeight: 10,
-    refX: 8,
-    refY: 3,
-    orient: "auto",
-    markerUnits: "strokeWidth"
-  });
-  marker.appendChild(svgEl("path", { d: "M0,0 L0,6 L9,3 z", fill: "#b42318" }));
-  defs.appendChild(marker);
-  return defs;
-}
-
-function renderRelationships(graph) {
-  const familyUnits = collectFamilyUnits();
-  const childrenInTwoParentFamilies = new Set(
-    familyUnits.flatMap((unit) => unit.children.map((child) => child.id))
-  );
-  const renderedPartnerKeys = new Set();
-
-  state.project.relationships
-    .filter((rel) => rel.type === "partner")
-    .forEach((rel) => {
-      const p1 = getPerson(rel.person1);
-      const p2 = getPerson(rel.person2);
-      if (!p1 || !p2) return;
-      renderPartnerLine(graph, p1, p2);
-      renderedPartnerKeys.add(parentKey([p1.id, p2.id]));
-    });
-
-  familyUnits.forEach((entry, index) => {
-    const [parentA, parentB] = entry.parents;
-    const key = parentKey([parentA.id, parentB.id]);
-    if (!renderedPartnerKeys.has(key)) {
-      renderPartnerLine(graph, parentA, parentB);
-      renderedPartnerKeys.add(key);
-    }
-    const midX = (parentA.x + parentB.x) / 2;
-    const marriageY = (parentA.y + parentB.y) / 2;
-    const childTopY = Math.min(...entry.children.map((child) => child.y)) - LINE_NODE_PADDING;
-    const baseSibshipY = childTopY - FAMILY_TRACK_STEP;
-    const childXs = entry.children.map((child) => child.x);
-    const sibshipY = routeHorizontalLineY(baseSibshipY, Math.min(...childXs), Math.max(...childXs), entry.children, index);
-    const descentX = routeVerticalLineX(midX, marriageY, sibshipY, entry.parents.concat(entry.children), index);
-    graph.appendChild(svgEl("line", { x1: midX, y1: marriageY, x2: descentX, y2: marriageY, class: "descent-line" }));
-    graph.appendChild(svgEl("line", { x1: descentX, y1: marriageY, x2: descentX, y2: sibshipY, class: "descent-line" }));
-    graph.appendChild(svgEl("line", { x1: descentX, y1: sibshipY, x2: midX, y2: sibshipY, class: "descent-line" }));
-    if (entry.children.length > 1) {
-      graph.appendChild(svgEl("line", {
-        x1: Math.min(...childXs),
-        y1: sibshipY,
-        x2: Math.max(...childXs),
-        y2: sibshipY,
-        class: "sibling-line"
-      }));
-    }
-    entry.children.forEach((child) => {
-      graph.appendChild(svgEl("line", { x1: child.x, y1: sibshipY, x2: child.x, y2: child.y - NODE_RADIUS, class: "individual-line" }));
-    });
-  });
-
-  state.project.relationships
-    .filter((rel) => rel.type === "parentChild")
-    .forEach((rel, index) => {
-      if (childrenInTwoParentFamilies.has(rel.child)) return;
-      const parent = getPerson(rel.parent);
-      const child = getPerson(rel.child);
-      if (!parent || !child) return;
-      const baseDescentY = child.y - LINE_NODE_PADDING;
-      const descentY = routeHorizontalLineY(baseDescentY, Math.min(parent.x, child.x), Math.max(parent.x, child.x), [child], index);
-      const descentX = routeVerticalLineX(parent.x, parent.y, descentY, [parent, child], index);
-      graph.appendChild(svgEl("line", { x1: parent.x, y1: parent.y + NODE_RADIUS, x2: descentX, y2: parent.y + NODE_RADIUS, class: "descent-line" }));
-      graph.appendChild(svgEl("line", { x1: descentX, y1: parent.y + NODE_RADIUS, x2: descentX, y2: descentY, class: "descent-line" }));
-      if (descentX !== child.x) {
-        graph.appendChild(svgEl("line", { x1: descentX, y1: descentY, x2: child.x, y2: descentY, class: "sibling-line" }));
-      }
-      graph.appendChild(svgEl("line", { x1: child.x, y1: descentY, x2: child.x, y2: child.y - NODE_RADIUS, class: "individual-line" }));
-    });
-}
-
-function renderPartnerLine(graph, p1, p2) {
-  graph.appendChild(svgEl("line", {
-    x1: p1.x,
-    y1: (p1.y + p2.y) / 2,
-    x2: p2.x,
-    y2: (p1.y + p2.y) / 2,
-    class: "marriage-line"
-  }));
-}
-
-function routeHorizontalLineY(baseY, x1, x2, attachedPeople, trackIndex) {
-  let y = baseY - (trackIndex % 4) * FAMILY_TRACK_STEP;
-  let attempts = 0;
-  while (attempts < 8 && horizontalLineIntersectsAnyNode(x1, x2, y, attachedPeople)) {
-    y -= FAMILY_TRACK_STEP;
-    attempts += 1;
-  }
-  return y;
-}
-
-function routeVerticalLineX(baseX, y1, y2, attachedPeople, trackIndex) {
-  let x = baseX;
-  let attempts = 0;
-  while (attempts < 8 && verticalLineIntersectsAnyNode(x, y1, y2, attachedPeople)) {
-    const direction = attempts % 2 === 0 ? 1 : -1;
-    const distance = Math.ceil((attempts + 1) / 2) * FAMILY_TRACK_STEP;
-    x = baseX + direction * distance;
-    attempts += 1;
-  }
-  return x;
-}
-
-function horizontalLineIntersectsAnyNode(x1, x2, y, attachedPeople) {
-  const attachedIds = new Set(attachedPeople.map((person) => person.id));
-  const left = Math.min(x1, x2) - LINE_NODE_PADDING;
-  const right = Math.max(x1, x2) + LINE_NODE_PADDING;
-  return state.project.people.some((person) => {
-    if (attachedIds.has(person.id)) return false;
-    const insideX = person.x > left && person.x < right;
-    const tooCloseY = Math.abs(person.y - y) < LINE_NODE_PADDING;
-    return insideX && tooCloseY;
-  });
-}
-
-function verticalLineIntersectsAnyNode(x, y1, y2, attachedPeople) {
-  const attachedIds = new Set(attachedPeople.map((person) => person.id));
-  const top = Math.min(y1, y2);
-  const bottom = Math.max(y1, y2);
-  return state.project.people.some((person) => {
-    if (attachedIds.has(person.id)) return false;
-    const insideY = person.y > top - LINE_NODE_PADDING && person.y < bottom + LINE_NODE_PADDING;
-    const tooCloseX = Math.abs(person.x - x) < LINE_NODE_PADDING;
-    return insideY && tooCloseX;
-  });
-}
-
-function renderGenerationLabels(graph) {
-  const generations = computeGenerations();
-  const rows = new Map();
-  state.project.people.forEach((person) => {
-    const generation = generations.get(person.id) ?? 0;
-    if (!rows.has(generation)) rows.set(generation, []);
-    rows.get(generation).push(person);
-  });
-  rows.forEach((people, generation) => {
-    const y = average(people.map((person) => person.y));
-    const minX = Math.min(...state.project.people.map((person) => person.x));
-    graph.appendChild(svgEl("text", {
-      x: minX - 92,
-      y,
-      class: "generation-label"
-    }, romanNumeral(generation + 1)));
-  });
-}
-
-function renderPerson(graph, person) {
-  const group = svgEl("g", {
-    class: "node-hit",
-    "data-person-id": person.id,
-    tabindex: "0"
-  });
-  group.addEventListener("pointerdown", (event) => startDrag(event, person.id));
-  group.addEventListener("click", (event) => {
-    event.stopPropagation();
-    selectPerson(person.id);
-  });
-
-  if (person.proband) {
-    group.appendChild(svgEl("path", {
-      d: `M ${person.x - NODE_SIZE * 1.65} ${person.y + NODE_SIZE * 0.95} L ${person.x - NODE_SIZE * 0.72} ${person.y + NODE_SIZE * 0.38}`,
-      class: "proband-arrow",
-      "marker-end": "url(#arrowHead)"
-    }));
-  }
-
-  if (state.selectedPersonId === person.id) {
-    group.appendChild(svgEl("circle", {
-      cx: person.x,
-      cy: person.y,
-      r: NODE_RADIUS + NODE_SIZE * 0.28,
-      class: "selected-ring"
-    }));
-  }
-
-  const className = `person-symbol ${person.affectedStatus || "unknown"}`;
-  if (person.sex === "female") {
-    group.appendChild(svgEl("circle", { cx: person.x, cy: person.y, r: NODE_RADIUS, class: className }));
-  } else if (person.sex === "male") {
-    group.appendChild(svgEl("rect", {
-      x: person.x - NODE_RADIUS,
-      y: person.y - NODE_RADIUS,
-      width: NODE_SIZE,
-      height: NODE_SIZE,
-      rx: 2,
-      class: className
-    }));
-  } else {
-    const d = `${person.x},${person.y - NODE_RADIUS} ${person.x + NODE_RADIUS},${person.y} ${person.x},${person.y + NODE_RADIUS} ${person.x - NODE_RADIUS},${person.y}`;
-    group.appendChild(svgEl("polygon", { points: d, class: className }));
-  }
-
-  if (person.deceased) {
-    group.appendChild(svgEl("line", {
-      x1: person.x - NODE_RADIUS * 1.15,
-      y1: person.y + NODE_RADIUS * 1.15,
-      x2: person.x + NODE_RADIUS * 1.15,
-      y2: person.y - NODE_RADIUS * 1.15,
-      class: "deceased-line"
-    }));
-  }
-
-  group.appendChild(svgEl("text", {
-    x: person.x,
-    y: person.y + LABEL_OFFSET,
-    class: "person-label"
-  }, person.name || "未命名"));
-
-  if (person.diagnoses.length > 0) {
-    group.appendChild(svgEl("text", {
-      x: person.x,
-      y: person.y + DIAGNOSIS_OFFSET,
-      class: "diagnosis-label"
-    }, person.diagnoses.slice(0, 2).join("、")));
-  }
-
-  graph.appendChild(group);
-}
-
-function svgEl(tag, attrs = {}, text) {
-  const node = document.createElementNS(SVG_NS, tag);
-  Object.entries(attrs).forEach(([key, value]) => {
-    node.setAttribute(key, String(value));
-  });
-  if (text !== undefined) {
-    node.textContent = text;
-  }
-  return node;
-}
-
-function getPerson(id) {
-  return state.project.people.find((person) => person.id === id) || null;
-}
-
-function findParents(personId) {
-  return state.project.relationships
-    .filter((rel) => rel.type === "parentChild" && rel.child === personId)
-    .map((rel) => getPerson(rel.parent))
-    .filter(Boolean);
-}
-
-function findPartners(personId) {
-  return state.project.relationships
-    .filter((rel) => rel.type === "partner" && (rel.person1 === personId || rel.person2 === personId))
-    .map((rel) => getPerson(rel.person1 === personId ? rel.person2 : rel.person1))
-    .filter(Boolean);
-}
-
-function collectFamilyUnits() {
-  const grouped = new Map();
-  state.project.people.forEach((child) => {
-    const parents = findParents(child.id).sort(compareProjectOrder);
-    if (parents.length < 2) return;
-    const primaryParents = choosePrimaryParents(parents);
-    const key = parentKey(primaryParents.map((parent) => parent.id));
-    if (!grouped.has(key)) {
-      grouped.set(key, { parents: primaryParents, children: [] });
-    }
-    grouped.get(key).children.push(child);
-  });
-  return [...grouped.values()].map((unit) => ({
-    parents: orderPartnerPeople(unit.parents[0], unit.parents[1]),
-    children: unit.children.sort(compareLayoutOrder)
-  }));
-}
-
-function choosePrimaryParents(parents) {
-  const male = parents.find((parent) => parent.sex === "male");
-  const female = parents.find((parent) => parent.sex === "female");
-  if (male && female) return [male, female];
-  return parents.slice(0, 2);
-}
-
-function parentKey(ids) {
-  return [...ids].sort().join("|");
-}
-
-function orderPartnerPeople(personA, personB) {
-  return orderPartnerIds(personA.id, personB.id).map((id) => getPerson(id)).filter(Boolean);
-}
-
-function orderPartnerIds(idA, idB) {
-  const personA = getPerson(idA);
-  const personB = getPerson(idB);
-  if (personA?.sex === "male" && personB?.sex !== "male") return [idA, idB];
-  if (personB?.sex === "male" && personA?.sex !== "male") return [idB, idA];
-  if (personA?.sex !== "female" && personB?.sex === "female") return [idA, idB];
-  if (personB?.sex !== "female" && personA?.sex === "female") return [idB, idA];
-  return [idA, idB].sort((a, b) => projectOrder(a) - projectOrder(b));
-}
-
-function compareProjectOrder(a, b) {
-  return projectOrder(a.id) - projectOrder(b.id);
-}
-
-function compareLayoutOrder(a, b) {
-  const orderA = Number.isFinite(a.layoutOrder) ? a.layoutOrder : projectOrder(a.id);
-  const orderB = Number.isFinite(b.layoutOrder) ? b.layoutOrder : projectOrder(b.id);
-  if (orderA !== orderB) return orderA - orderB;
-  return projectOrder(a.id) - projectOrder(b.id);
-}
-
-function projectOrder(id) {
-  return state.project.people.findIndex((person) => person.id === id);
-}
-
-function selectPerson(id) {
-  state.selectedPersonId = id;
-  updateControls();
-  renderAll();
-}
-
-function autoLayout(resetManual) {
-  if (state.project.people.length === 0) return;
-  if (resetManual) {
-    clearManualPositions();
-  }
-  const generations = computeGenerations();
-  const grouped = new Map();
-  state.project.people.forEach((person) => {
-    const generation = generations.get(person.id) ?? 0;
-    if (!grouped.has(generation)) grouped.set(generation, []);
-    grouped.get(generation).push(person);
-  });
-
-  const sortedGenerations = [...grouped.keys()].sort((a, b) => a - b);
-  const centerX = CANVAS_CENTER_X;
-  sortedGenerations.forEach((generation, generationIndex) => {
-    const people = grouped.get(generation);
-    people.sort(compareLayoutOrder);
-    const startX = centerX - ((people.length - 1) * PERSON_GAP) / 2;
-    people.forEach((person, index) => {
-      if (!resetManual && person.manualPosition) return;
-      person.x = startX + index * PERSON_GAP;
-      person.y = FIRST_GENERATION_Y + generationIndex * GENERATION_GAP;
-    });
-  });
-
-  for (let pass = 0; pass < 4; pass += 1) {
-    alignPartnerPairs(resetManual);
-    alignFamilyUnits(resetManual);
-    alignSingleParentChildren(resetManual);
-    avoidNodeCollisionsByGeneration();
-  }
-  avoidNodeCollisionsByGeneration();
-}
-
-function alignPartnerPairs(resetManual) {
-  state.project.relationships
-    .filter((rel) => rel.type === "partner")
-    .forEach((rel) => {
-      const [leftId, rightId] = orderPartnerIds(rel.person1, rel.person2);
-      const left = getPerson(leftId);
-      const right = getPerson(rightId);
-      if (!left || !right) return;
-      const centerX = (left.x + right.x) / 2;
-      const centerY = (left.y + right.y) / 2;
-      if (resetManual || !left.manualPosition) {
-        left.x = centerX - PERSON_GAP / 2;
-        left.y = centerY;
-      }
-      if (resetManual || !right.manualPosition) {
-        right.x = centerX + PERSON_GAP / 2;
-        right.y = centerY;
-      }
-    });
-}
-
-function alignFamilyUnits(resetManual) {
-  collectFamilyUnits().forEach((unit) => {
-    const [leftParent, rightParent] = unit.parents;
-    const children = unit.children;
-    if (!leftParent || !rightParent || children.length === 0) return;
-
-    const parentCenter = (leftParent.x + rightParent.x) / 2;
-    const centerX = parentCenter;
-    const parentY = Math.min(leftParent.y, rightParent.y);
-    const childY = parentY + GENERATION_GAP;
-    const childStartX = centerX - ((children.length - 1) * PERSON_GAP) / 2;
-
-    if (resetManual || !leftParent.manualPosition) {
-      leftParent.x = centerX - PERSON_GAP / 2;
-      leftParent.y = parentY;
-    }
-    if (resetManual || !rightParent.manualPosition) {
-      rightParent.x = centerX + PERSON_GAP / 2;
-      rightParent.y = parentY;
-    }
-    children.forEach((child, index) => {
-      if (resetManual || !child.manualPosition) {
-        child.x = childStartX + index * PERSON_GAP;
-        child.y = childY;
-      }
-    });
-  });
-}
-
-function alignSingleParentChildren(resetManual) {
-  const twoParentChildren = new Set(
-    collectFamilyUnits().flatMap((unit) => unit.children.map((child) => child.id))
-  );
-  state.project.people.forEach((child) => {
-    if (twoParentChildren.has(child.id)) return;
-    const parents = findParents(child.id);
-    if (parents.length !== 1) return;
-    const parent = parents[0];
-    if (resetManual || !child.manualPosition) {
-      child.x = parent.x;
-      child.y = parent.y + GENERATION_GAP;
-    }
-  });
-}
-
-function clearManualPositions() {
-  state.project.people.forEach((person) => {
-    person.manualPosition = false;
-  });
-}
-
-function avoidNodeCollisionsByGeneration() {
-  const generations = computeGenerations();
-  const groups = new Map();
-  state.project.people.forEach((person) => {
-    const generation = generations.get(person.id) ?? 0;
-    if (!groups.has(generation)) groups.set(generation, []);
-    groups.get(generation).push(person);
-  });
-
-  groups.forEach((people) => {
-    const ordered = people.sort((a, b) => a.x - b.x || compareLayoutOrder(a, b));
-    for (let index = 1; index < ordered.length; index += 1) {
-      const previous = ordered[index - 1];
-      const current = ordered[index];
-      const minX = previous.x + MIN_NODE_GAP;
-      if (current.x < minX) {
-        current.x = minX;
-      }
-    }
-    const center = average(ordered.map((person) => person.x));
-    const targetCenter = CANVAS_CENTER_X;
-    const shift = targetCenter - center;
-    ordered.forEach((person) => {
-      person.x += shift;
-    });
-  });
-}
-
-function average(values) {
-  if (values.length === 0) return NaN;
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function romanNumeral(value) {
-  const table = [
-    ["X", 10],
-    ["IX", 9],
-    ["V", 5],
-    ["IV", 4],
-    ["I", 1]
-  ];
-  let remaining = value;
-  let result = "";
-  table.forEach(([symbol, amount]) => {
-    while (remaining >= amount) {
-      result += symbol;
-      remaining -= amount;
-    }
-  });
-  return result || "I";
-}
-
-function computeGenerations() {
-  const map = new Map();
-  const proband = state.project.people.find((person) => person.proband) || state.project.people[0];
-  if (!proband) return map;
-  map.set(proband.id, 0);
-
-  let changed = true;
-  while (changed) {
-    changed = false;
-    state.project.relationships.forEach((rel) => {
-      if (rel.type === "parentChild") {
-        const parentGen = map.get(rel.parent);
-        const childGen = map.get(rel.child);
-        if (childGen !== undefined && parentGen === undefined) {
-          map.set(rel.parent, childGen - 1);
-          changed = true;
-        } else if (parentGen !== undefined && childGen === undefined) {
-          map.set(rel.child, parentGen + 1);
-          changed = true;
-        }
-      }
-      if (rel.type === "partner") {
-        const gen1 = map.get(rel.person1);
-        const gen2 = map.get(rel.person2);
-        if (gen1 !== undefined && gen2 === undefined) {
-          map.set(rel.person2, gen1);
-          changed = true;
-        } else if (gen2 !== undefined && gen1 === undefined) {
-          map.set(rel.person1, gen2);
-          changed = true;
-        }
-      }
-    });
-  }
-
-  state.project.people.forEach((person) => {
-    if (!map.has(person.id)) map.set(person.id, 0);
-  });
-
-  const min = Math.min(...map.values());
-  if (min < 0) {
-    map.forEach((value, key) => map.set(key, value - min));
-  }
-  return map;
-}
-
-function startDrag(event, personId) {
-  event.preventDefault();
-  state.selectedPersonId = personId;
-  updateControls();
-  const point = svgPoint(event);
-  const person = getPerson(personId);
-  state.dragging = {
-    personId,
-    dx: point.x - person.x,
-    dy: point.y - person.y
-  };
-  event.currentTarget.setPointerCapture(event.pointerId);
-}
-
-function onPointerMove(event) {
-  if (!state.dragging) return;
-  const person = getPerson(state.dragging.personId);
-  if (!person) return;
-  const point = svgPoint(event);
-  person.x = point.x - state.dragging.dx;
-  person.y = point.y - state.dragging.dy;
-  person.manualPosition = true;
-  renderAll();
-}
-
-function endDrag() {
-  if (!state.dragging) return;
-  const draggedPersonId = state.dragging.personId;
-  state.dragging = null;
-  reorderGenerationByCurrentX(draggedPersonId);
-  autoLayout(true);
-  state.selectedPersonId = draggedPersonId;
-  commitChange("同代顺序已调整");
-}
-
-function reorderGenerationByCurrentX(personId) {
-  const generations = computeGenerations();
-  const generation = generations.get(personId);
-  if (generation === undefined) return;
-  state.project.people
-    .filter((person) => generations.get(person.id) === generation)
-    .sort((a, b) => a.x - b.x || projectOrder(a.id) - projectOrder(b.id))
-    .forEach((person, index) => {
-      person.layoutOrder = index + 1;
-      person.manualPosition = false;
-    });
-}
-
-function svgPoint(event) {
+/* ============================================================
+   选择 / 拖动 / 平移 / 缩放
+   ============================================================ */
+function svgPoint(evt) {
   const rect = els.pedigreeSvg.getBoundingClientRect();
   return {
-    x: (event.clientX - rect.left - state.offsetX) / state.scale,
-    y: (event.clientY - rect.top - state.offsetY) / state.scale
+    x: (evt.clientX - rect.left - state.offsetX) / state.scale,
+    y: (evt.clientY - rect.top - state.offsetY) / state.scale
   };
 }
 
-function onCanvasWheel(event) {
-  event.preventDefault();
-  const delta = event.deltaY > 0 ? -0.08 : 0.08;
-  setZoom(state.scale + delta);
+function onCanvasPointerDown(evt) {
+  const target = evt.target.closest(".node-hit");
+  if (target) {
+    const id = target.getAttribute("data-id");
+    state.selectedId = id;
+    const pt = svgPoint(evt);
+    const p = getPerson(id);
+    state.drag = { id, dx: pt.x - p.x, dy: pt.y - p.y, moved: false, snapshotTaken: false };
+    refresh(false);
+  } else {
+    // 空白：平移画布
+    state.pan = { startX: evt.clientX, startY: evt.clientY, ox: state.offsetX, oy: state.offsetY };
+    els.canvasWrap.classList.add("panning");
+    state.selectedId = null;
+    refresh(false);
+  }
 }
 
-function setZoom(value) {
-  state.scale = Math.min(1.8, Math.max(0.45, value));
-  commitChange(`缩放 ${Math.round(state.scale * 100)}%`);
+function onPointerMove(evt) {
+  if (state.drag) {
+    const p = getPerson(state.drag.id);
+    if (!p) return;
+    if (!state.drag.snapshotTaken) { pushHistory(); state.drag.snapshotTaken = true; }
+    const pt = svgPoint(evt);
+    p.x = pt.x - state.drag.dx;
+    p.y = pt.y - state.drag.dy;
+    state.drag.moved = true;
+    renderSvg();
+  } else if (state.pan) {
+    state.offsetX = state.pan.ox + (evt.clientX - state.pan.startX);
+    state.offsetY = state.pan.oy + (evt.clientY - state.pan.startY);
+    renderSvg();
+  }
 }
 
-function resetView() {
-  state.scale = 1;
-  state.offsetX = 0;
-  state.offsetY = 0;
-  commitChange("视图已重置");
+function onPointerUp() {
+  if (state.drag) {
+    if (!state.drag.moved) {
+      // 仅点击：取消刚才（未发生的）快照不需要
+    } else {
+      // 拖动后按同代 x 重排顺序并吸附回标准布局
+      reorderByX(state.drag.id);
+      autoLayout();
+      fitKeep();
+    }
+    const id = state.drag.id;
+    state.drag = null;
+    state.selectedId = id;
+    refresh();
+  }
+  if (state.pan) {
+    state.pan = null;
+    els.canvasWrap.classList.remove("panning");
+  }
 }
 
+function reorderByX(id) {
+  const gen = computeGenerations();
+  const g = gen.get(id);
+  if (g === undefined) return;
+  state.project.people
+    .filter((p) => gen.get(p.id) === g)
+    .sort((a, b) => a.x - b.x)
+    .forEach((p, i) => (p.order = (gen.get(p.id) * 1000) + i));
+  // 归一 order 为整数序列，保持全局稳定
+  state.project.people
+    .slice().sort((a, b) => a.order - b.order)
+    .forEach((p, i) => (p.order = i + 1));
+}
+
+function onWheel(evt) {
+  evt.preventDefault();
+  const factor = evt.deltaY > 0 ? -0.1 : 0.1;
+  zoomAt(evt.clientX, evt.clientY, factor);
+}
+
+function zoomAt(clientX, clientY, delta) {
+  const rect = els.pedigreeSvg.getBoundingClientRect();
+  const px = clientX - rect.left, py = clientY - rect.top;
+  const wx = (px - state.offsetX) / state.scale;
+  const wy = (py - state.offsetY) / state.scale;
+  const newScale = clamp(state.scale + delta, MIN_SCALE, MAX_SCALE);
+  state.offsetX = px - wx * newScale;
+  state.offsetY = py - wy * newScale;
+  state.scale = newScale;
+  renderSvg();
+  updateButtons();
+}
+
+function zoomBy(delta) {
+  const rect = els.pedigreeSvg.getBoundingClientRect();
+  zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, delta);
+}
+
+function fitView() {
+  if (state.project.people.length === 0) { state.scale = 1; state.offsetX = 0; state.offsetY = 0; renderSvg(); updateButtons(); return; }
+  const b = contentBounds();
+  const s = state.project.settings;
+  const padL = 110, padR = s.showLegend ? 280 : 110, padT = s.showTitle ? 110 : 90, padB = 110;
+  const rect = els.canvasWrap.getBoundingClientRect();
+  const cw = rect.width || 800, ch = rect.height || 600;
+  const worldW = b.width + padL + padR;
+  const worldH = b.height + padT + padB;
+  const scale = clamp(Math.min(cw / worldW, ch / worldH), MIN_SCALE, 1.4);
+  state.scale = scale;
+  state.offsetX = (cw - (b.width) * scale) / 2 - (b.minX - padL * 0 - (padL - padR) / 2) * scale;
+  // 简化：直接居中内容包围盒中心
+  const centerX = (b.minX + b.maxX) / 2;
+  const centerY = (b.minY + b.maxY) / 2;
+  state.offsetX = cw / 2 - centerX * scale + (s.showLegend ? -70 * scale : 0);
+  state.offsetY = ch / 2 - centerY * scale + (s.showTitle ? 18 * scale : 0);
+  renderSvg();
+  updateButtons();
+}
+
+function fitKeep() { renderSvg(); }
+
+/* ============================================================
+   键盘快捷键
+   ============================================================ */
+function onKeyDown(evt) {
+  const tag = (evt.target.tagName || "").toLowerCase();
+  const typing = tag === "input" || tag === "textarea" || tag === "select";
+  if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "z") { evt.preventDefault(); undo(); return; }
+  if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === "y") { evt.preventDefault(); redo(); return; }
+  if ((evt.ctrlKey || evt.metaKey) && evt.shiftKey && evt.key.toLowerCase() === "z") { evt.preventDefault(); redo(); return; }
+  if (typing) return;
+  const k = evt.key.toLowerCase();
+  if (k === "f") { evt.preventDefault(); addParent("male"); }
+  else if (k === "m") { evt.preventDefault(); addParent("female"); }
+  else if (k === "e") { evt.preventDefault(); addPartner(); }
+  else if (k === "c") { evt.preventDefault(); addChild("male"); }
+  else if (k === "d") { evt.preventDefault(); addChild("female"); }
+  else if (k === "b") { evt.preventDefault(); addSibling("male"); }
+  else if (k === "s") { evt.preventDefault(); addSibling("female"); }
+  else if (evt.key === "Delete" || evt.key === "Backspace") { if (selectedPerson()) { evt.preventDefault(); deleteSelected(); } }
+}
+
+/* ============================================================
+   撤销 / 重做
+   ============================================================ */
+function snapshot() { return JSON.stringify(state.project); }
+function pushHistory() {
+  state.history.push(snapshot());
+  if (state.history.length > 60) state.history.shift();
+  state.future = [];
+}
+function undo() {
+  if (state.history.length === 0) return;
+  state.future.push(snapshot());
+  state.project = JSON.parse(state.history.pop());
+  state.selectedId = null;
+  applySettingsToUI();
+  computeGenerations();
+  autoLayout(); refresh(); fitView();
+  setStatus("已撤销");
+}
+function redo() {
+  if (state.future.length === 0) return;
+  state.history.push(snapshot());
+  state.project = JSON.parse(state.future.pop());
+  state.selectedId = null;
+  applySettingsToUI();
+  autoLayout(); refresh(); fitView();
+  setStatus("已重做");
+}
+
+/* ============================================================
+   存档 / 读取 / 自动保存
+   ============================================================ */
 function autosave() {
-  localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(state.project));
+  try { localStorage.setItem(AUTOSAVE_KEY, snapshot()); } catch (e) { /* ignore */ }
 }
-
 function restoreAutosave() {
   const raw = localStorage.getItem(AUTOSAVE_KEY);
   if (!raw) return false;
   try {
-    const project = JSON.parse(raw);
-    validateProject(project);
-    state.project = normalizeProject(project);
-    state.scale = state.project.viewport?.scale || 1;
-    state.offsetX = state.project.viewport?.offsetX || 0;
-    state.offsetY = state.project.viewport?.offsetY || 0;
-    state.selectedPersonId = state.project.people[0]?.id || null;
-    setStatus("已恢复自动保存");
+    const proj = normalizeProject(JSON.parse(raw));
+    state.project = proj;
+    state.selectedId = null;
+    applySettingsToUI();
+    autoLayout();
+    setStatus("已恢复上次自动保存");
     return true;
-  } catch {
-    localStorage.removeItem(AUTOSAVE_KEY);
-    return false;
-  }
+  } catch (e) { localStorage.removeItem(AUTOSAVE_KEY); return false; }
 }
 
-function saveProjectJson() {
-  const content = JSON.stringify(state.project, null, 2);
-  const blob = new Blob([content], { type: "application/json" });
-  downloadBlob(blob, `${safeFileName(state.project.title)}_${timeStamp()}.json`);
-  setStatus("JSON 已保存");
+function newProject() {
+  if (state.project.people.length > 0 && !confirm("新建会清空当前家系图，是否继续？")) return;
+  pushHistory();
+  state.project = createProject();
+  state.selectedId = null;
+  applySettingsToUI();
+  refresh(); fitView();
+  setStatus("已新建空白家系图");
 }
 
-function loadProjectJson(event) {
-  const file = event.target.files[0];
+function saveJson() {
+  state.project.updatedAt = new Date().toISOString();
+  const blob = new Blob([JSON.stringify(state.project, null, 2)], { type: "application/json" });
+  download(blob, `${safeName(state.project.title)}_${stamp()}.json`);
+  setStatus("项目已保存为 JSON");
+}
+
+function loadJson(evt) {
+  const file = evt.target.files[0];
   if (!file) return;
   const reader = new FileReader();
   reader.onload = () => {
     try {
-      const project = JSON.parse(reader.result);
-      validateProject(project);
-      state.project = normalizeProject(project);
-      state.selectedPersonId = state.project.people[0]?.id || null;
-      state.scale = state.project.viewport?.scale || 1;
-      state.offsetX = state.project.viewport?.offsetX || 0;
-      state.offsetY = state.project.viewport?.offsetY || 0;
-      commitChange("JSON 已加载");
-    } catch (error) {
-      setStatus(`加载失败：${error.message}`);
-    } finally {
-      event.target.value = "";
-    }
+      const proj = normalizeProject(JSON.parse(reader.result));
+      pushHistory();
+      state.project = proj;
+      state.selectedId = null;
+      applySettingsToUI();
+      autoLayout(); refresh(); fitView();
+      setStatus("项目已加载");
+    } catch (err) { setStatus("加载失败：文件格式不正确"); }
+    finally { evt.target.value = ""; }
   };
   reader.readAsText(file, "utf-8");
 }
 
-function validateProject(project) {
-  if (!project || !Array.isArray(project.people) || !Array.isArray(project.relationships)) {
-    throw new Error("不是有效的项目文件");
-  }
-}
-
-function normalizeProject(project) {
+function normalizeProject(proj) {
+  if (!proj || !Array.isArray(proj.people) || !Array.isArray(proj.relationships)) throw new Error("invalid");
+  const base = createProject();
   return {
-    ...createProject(),
-    ...project,
-    settings: { ...createProject().settings, ...(project.settings || {}) },
-    viewport: { ...createProject().viewport, ...(project.viewport || {}) },
-    people: project.people.map((person, index) => ({
+    ...base,
+    ...proj,
+    settings: { ...base.settings, ...(proj.settings || {}) },
+    people: proj.people.map((p, i) => ({
       ...createPerson(),
-      ...person,
-      diagnoses: Array.isArray(person.diagnoses) ? person.diagnoses : [],
-      layoutOrder: Number.isFinite(person.layoutOrder) ? person.layoutOrder : index + 1
-    }))
+      ...p,
+      diagnoses: Array.isArray(p.diagnoses) ? p.diagnoses : [],
+      order: Number.isFinite(p.order) ? p.order : i + 1
+    })),
+    relationships: proj.relationships
   };
 }
 
-async function exportPng() {
-  try {
-    const sourceSvg = els.pedigreeSvg.cloneNode(true);
-    const bounds = getContentBounds();
-    const padding = 70;
-    const width = Math.max(600, bounds.width + padding * 2);
-    const height = Math.max(420, bounds.height + padding * 2);
-    sourceSvg.setAttribute("width", width);
-    sourceSvg.setAttribute("height", height);
-    sourceSvg.setAttribute("viewBox", `${bounds.x - padding} ${bounds.y - padding} ${width} ${height}`);
-    sourceSvg.insertBefore(svgEl("rect", {
-      x: bounds.x - padding,
-      y: bounds.y - padding,
-      width,
-      height,
-      fill: "#ffffff"
-    }), sourceSvg.firstChild);
+/* ============================================================
+   导出 PNG / SVG
+   ============================================================ */
+function buildExportSvg() {
+  const b = contentBounds();
+  const s = state.project.settings;
+  const padL = 90, padT = s.showTitle ? 100 : 70, padB = 90;
+  const padR = s.showLegend ? 280 : 90;
+  const vbX = b.minX - padL;
+  const vbY = b.minY - padT;
+  const W = b.width + padL + padR;
+  const Hh = b.height + padT + padB;
 
-    const style = document.createElement("style");
-    style.textContent = collectExportStyles();
-    sourceSvg.insertBefore(style, sourceSvg.firstChild);
-
-    const svgText = new XMLSerializer().serializeToString(sourceSvg);
-    const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const image = new Image();
-    image.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = width * 2;
-      canvas.height = height * 2;
-      const ctx = canvas.getContext("2d");
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-      URL.revokeObjectURL(url);
-      canvas.toBlob((pngBlob) => {
-        downloadBlob(pngBlob, `${safeFileName(state.project.title)}_${timeStamp()}.png`);
-        setStatus("PNG 已导出");
-      }, "image/png");
-    };
-    image.onerror = () => {
-      URL.revokeObjectURL(url);
-      setStatus("PNG 导出失败");
-    };
-    image.src = url;
-  } catch (error) {
-    setStatus(`导出失败：${error.message}`);
-  }
+  const svg = svgEl("svg", {
+    xmlns: SVG_NS, width: W, height: Hh, viewBox: `${vbX} ${vbY} ${W} ${Hh}`
+  });
+  svg.appendChild(svgEl("rect", { x: vbX, y: vbY, width: W, height: Hh, fill: "#ffffff" }));
+  svg.appendChild(buildDefs());
+  const style = document.createElement("style");
+  style.textContent = exportStyles();
+  svg.appendChild(style);
+  const g = svgEl("g");
+  svg.appendChild(g);
+  drawGenerationLabels(g);
+  drawRelationships(g);
+  state.project.people.forEach((p) => drawPersonStatic(g, p));
+  if (s.showTitle) drawTitle(g);
+  if (s.showLegend) drawLegend(g);
+  return { svg, W, H: Hh };
 }
 
-function getContentBounds() {
-  if (state.project.people.length === 0) {
-    return { x: 0, y: 0, width: 600, height: 420 };
-  }
-  const xs = state.project.people.map((person) => person.x);
-  const ys = state.project.people.map((person) => person.y);
-  return {
-    x: Math.min(...xs) - 60,
-    y: Math.min(...ys) - 70,
-    width: Math.max(...xs) - Math.min(...xs) + 120,
-    height: Math.max(...ys) - Math.min(...ys) + 150
-  };
+function drawPersonStatic(root, p) {
+  // 与 drawPerson 相同，但不含选中环
+  const saved = state.selectedId;
+  state.selectedId = null;
+  drawPerson(root, p);
+  state.selectedId = saved;
 }
 
-function collectExportStyles() {
+function exportStyles() {
   return `
-    .link-line,.descent-line,.individual-line,.marriage-line,.sibling-line{stroke:#2f3a42;stroke-width:2.2;fill:none;stroke-linecap:square}
-    .person-symbol{stroke:#2f3a42;stroke-width:2.8}
-    .person-symbol.unaffected{fill:#fff}
-    .person-symbol.affected{fill:#2f3a42}
-    .person-symbol.suspected{fill:url(#suspectedPattern)}
-    .person-symbol.unknown{fill:#e2e8ec}
-    .person-label{font:13px "Microsoft YaHei", Arial, sans-serif;fill:#172026;text-anchor:middle;dominant-baseline:hanging}
-    .diagnosis-label{font:11px "Microsoft YaHei", Arial, sans-serif;fill:#65717b;text-anchor:middle;dominant-baseline:hanging}
-    .generation-label{font:700 15px "Microsoft YaHei", Arial, sans-serif;fill:#65717b;text-anchor:middle;dominant-baseline:middle}
-    .selected-ring{display:none}
-    .deceased-line{stroke:#b42318;stroke-width:2.4;stroke-linecap:round}
-    .proband-arrow{stroke:#b42318;stroke-width:2.4;fill:none;stroke-linecap:round}
-    .empty-canvas-text{font:18px "Microsoft YaHei", Arial, sans-serif;fill:#65717b;text-anchor:middle}
+  .marriage-line,.descent-line,.sibling-line,.individual-line{stroke:#2f3a42;stroke-width:2.2;fill:none;stroke-linecap:square}
+  .person-symbol{stroke:#2f3a42;stroke-width:2.8}
+  .person-symbol.unaffected{fill:#fff}
+  .person-symbol.affected{fill:#2f3a42}
+  .person-symbol.suspected{fill:url(#suspectedPattern)}
+  .person-symbol.unknown{fill:#e2e8ec}
+  .person-label{font:13px "Microsoft YaHei",sans-serif;fill:#172026;text-anchor:middle;dominant-baseline:hanging}
+  .id-label{font:600 12px "Microsoft YaHei",sans-serif;fill:#3a444c;text-anchor:end;dominant-baseline:hanging}
+  .diagnosis-label{font:11px "Microsoft YaHei",sans-serif;fill:#5a6b8c;text-anchor:middle;dominant-baseline:hanging}
+  .meta-label{font:11px "Microsoft YaHei",sans-serif;fill:#65717b;text-anchor:middle;dominant-baseline:hanging}
+  .generation-label{font:700 14px "Microsoft YaHei",sans-serif;fill:#9aa6b0;text-anchor:middle;dominant-baseline:middle}
+  .deceased-line{stroke:#2f3a42;stroke-width:2.6;stroke-linecap:round}
+  .proband-arrow{stroke:#2f3a42;stroke-width:2.2;fill:none;stroke-linecap:round}
+  .proband-label{font:700 12px "Microsoft YaHei",sans-serif;fill:#2f3a42;text-anchor:middle}
+  .title-text{font:700 20px "Microsoft YaHei",sans-serif;fill:#1b2329;text-anchor:middle}
+  .legend-box{fill:#fff;stroke:#d8dde2;stroke-width:1.2}
+  .legend-title{font:700 12px "Microsoft YaHei",sans-serif;fill:#3a444c}
+  .legend-text{font:11.5px "Microsoft YaHei",sans-serif;fill:#4a5560;dominant-baseline:middle}
+  .selected-ring{display:none}
   `;
 }
 
-function downloadBlob(blob, fileName) {
-  if (!blob) return;
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = fileName;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-function newProject() {
-  if (state.project.people.length > 0 && !confirm("新建项目会清空当前画布，是否继续？")) {
+function exportImage(kind) {
+  if (state.project.people.length === 0) { setStatus("画布为空，无法导出"); return; }
+  const { svg, W, H } = buildExportSvg();
+  const xml = new XMLSerializer().serializeToString(svg);
+  if (kind === "svg") {
+    const blob = new Blob([`<?xml version="1.0" encoding="UTF-8"?>\n` + xml], { type: "image/svg+xml;charset=utf-8" });
+    download(blob, `${safeName(state.project.title)}_${stamp()}.svg`);
+    setStatus("SVG 已导出");
     return;
   }
-  state.project = createProject();
-  state.selectedPersonId = null;
-  state.scale = 1;
-  state.offsetX = 0;
-  state.offsetY = 0;
-  commitChange("新项目已创建");
+  // PNG
+  const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => {
+    const scale = 2.5;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(W * scale);
+    canvas.height = Math.round(H * scale);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    URL.revokeObjectURL(url);
+    canvas.toBlob((png) => { download(png, `${safeName(state.project.title)}_${stamp()}.png`); setStatus("PNG 已导出"); }, "image/png");
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); setStatus("PNG 导出失败，请重试"); };
+  img.src = url;
 }
 
-function safeFileName(value) {
-  return (value || "家系图").replace(/[\\/:*?"<>|]/g, "_");
+/* ============================================================
+   工具函数
+   ============================================================ */
+function download(blob, name) {
+  if (!blob) return;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
 }
-
-function timeStamp() {
-  const now = new Date();
-  const pad = (value) => String(value).padStart(2, "0");
-  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+function safeName(v) { return (v || "家系图").replace(/[\\/:*?"<>|]/g, "_"); }
+function stamp() {
+  const d = new Date(), pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
 }
-
-function setStatus(message) {
-  els.statusLine.textContent = message;
-}
+function setStatus(msg) { els.statusLine.textContent = msg; }
+function avg(a) { return a.reduce((s, v) => s + v, 0) / (a.length || 1); }
+function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
