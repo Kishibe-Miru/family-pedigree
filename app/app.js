@@ -1,7 +1,7 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 4.8
+   精神科遗传家族谱系图绘制工具 5.0
    纯前端、本地优先。本版新增：双胞胎（同卵/异卵）、携带者圆点、
    近亲婚配自动双线、拖动自由摆放开关、一键生成家族史文字。
    4.1：连线 T 形修复；新增"与已选成员结婚"连接已有节点为配偶；
@@ -9,11 +9,12 @@
    4.2：固定同胞出生顺序；同胞小家庭整体平移；多配偶/半同胞婚配线避让。
    4.7：婚配线固定同代水平连接；同胞线仅覆盖子女范围并使用线路层避让。
    4.8：稳定性修复：多配偶子女归属选择、独生子女断线、校验与撤销/存储修复。
+   5.0：显式领域模型：Union / Parentage / Phenotype / GeneticFinding / Layout。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "4.8";
+const VERSION = "5.0";
 
 // 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
 const PLACEHOLDER_NAMES = new Set([
@@ -52,7 +53,7 @@ const state = {
   storageFailed: false,
   genMap: new Map(),
   numberMap: new Map(),
-  familyUnits: []
+  layoutFamilyUnits: []
 };
 
 const els = {};
@@ -150,14 +151,18 @@ function bindEvents() {
 function createProject() {
   const now = new Date().toISOString();
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     version: VERSION,
     title: "家族谱系图",
     createdAt: now,
     updatedAt: now,
     people: [],
-    relationships: [],
-    familyUnits: [],
+    unions: [],
+    parentages: [],
+    phenotypes: [],
+    geneticFindings: [],
+    pregnancies: [],
+    layout: { positions: {} },
     settings: {
       showNumber: true, showName: true, showDiagnosis: true,
       showAge: false, showLegend: true, showTitle: true, snapDrag: true
@@ -205,26 +210,112 @@ function requireSelection() {
   return p;
 }
 
-function addRelationship(rel) { state.project.relationships.push({ id: makeId("r"), ...rel }); }
+function ensureDomainArrays() {
+  state.project.unions = Array.isArray(state.project.unions) ? state.project.unions : [];
+  state.project.parentages = Array.isArray(state.project.parentages) ? state.project.parentages : [];
+  state.project.phenotypes = Array.isArray(state.project.phenotypes) ? state.project.phenotypes : [];
+  state.project.geneticFindings = Array.isArray(state.project.geneticFindings) ? state.project.geneticFindings : [];
+  state.project.pregnancies = Array.isArray(state.project.pregnancies) ? state.project.pregnancies : [];
+  state.project.layout = state.project.layout || { positions: {} };
+  state.project.layout.positions = state.project.layout.positions || {};
+}
+
+function unionKeyFor(partnerIds) { return PedigreeDomain.unionKey(partnerIds); }
+
+function findUnionByPartners(partnerIds) {
+  const key = unionKeyFor(partnerIds);
+  return state.project.unions.find((u) => unionKeyFor(u.partnerIds) === key) || null;
+}
+
+function ensureUnion(partnerIds) {
+  ensureDomainArrays();
+  const unique = [...new Set(partnerIds)].filter(Boolean);
+  const ids = unique.length === 2 ? orderCouple(unique[0], unique[1]) : unique;
+  const existing = findUnionByPartners(ids);
+  if (existing) return existing;
+  const union = {
+    id: makeId("u"),
+    partnerIds: [...new Set(ids)],
+    status: ids.length === 1 ? "single-parent" : "partner",
+    order: state.project.unions.length + 1
+  };
+  state.project.unions.push(union);
+  return union;
+}
+
+function addParentage(parentIds, childId, unionId = "") {
+  ensureDomainArrays();
+  const unique = [...new Set(parentIds)].filter(Boolean);
+  const ids = unique.length === 2 ? orderCouple(unique[0], unique[1]) : unique;
+  const union = unionId ? state.project.unions.find((u) => u.id === unionId) : ensureUnion(ids);
+  const existing = state.project.parentages.find((pa) => pa.childId === childId && pa.unionId === union.id);
+  if (existing) {
+    existing.parentIds = orderCouple(...[...new Set([...existing.parentIds, ...ids])]);
+    return existing;
+  }
+  const parentage = {
+    id: makeId("pa"),
+    unionId: union.id,
+    parentIds: ids,
+    childId,
+    kind: "biological"
+  };
+  state.project.parentages.push(parentage);
+  return parentage;
+}
+
+function setBiologicalParentage(childId, parentIds) {
+  ensureDomainArrays();
+  const unique = [...new Set(parentIds)].filter(Boolean);
+  const ordered = unique.length === 2 ? orderCouple(unique[0], unique[1]) : unique;
+  const union = ensureUnion(ordered);
+  state.project.parentages = state.project.parentages.filter((pa) => !(pa.childId === childId && pa.kind === "biological"));
+  return addParentage(ordered, childId, union.id);
+}
+
+function addRelationship(rel) {
+  if (rel.type === "partner") {
+    ensureUnion([rel.person1, rel.person2]);
+  } else if (rel.type === "parentChild") {
+    addParentage([rel.parent], rel.child);
+  }
+}
 
 function findParents(id) {
-  return state.project.relationships
-    .filter((r) => r.type === "parentChild" && r.child === id)
-    .map((r) => getPerson(r.parent)).filter(Boolean);
+  ensureDomainArrays();
+  return state.project.parentages
+    .filter((pa) => pa.childId === id)
+    .flatMap((pa) => pa.parentIds)
+    .filter((v, i, arr) => arr.indexOf(v) === i)
+    .map((parentId) => getPerson(parentId)).filter(Boolean);
 }
 function findChildren(id) {
-  return state.project.relationships
-    .filter((r) => r.type === "parentChild" && r.parent === id)
-    .map((r) => getPerson(r.child)).filter(Boolean);
+  ensureDomainArrays();
+  return state.project.parentages
+    .filter((pa) => pa.parentIds.includes(id))
+    .map((pa) => getPerson(pa.childId)).filter(Boolean);
 }
 function findPartners(id) {
-  return state.project.relationships
-    .filter((r) => r.type === "partner" && (r.person1 === id || r.person2 === id))
-    .map((r) => getPerson(r.person1 === id ? r.person2 : r.person1)).filter(Boolean);
+  ensureDomainArrays();
+  return state.project.unions
+    .filter((u) => u.partnerIds.includes(id) && u.partnerIds.length === 2)
+    .map((u) => getPerson(u.partnerIds.find((partnerId) => partnerId !== id))).filter(Boolean);
 }
 function hasPartner(a, b) {
-  return state.project.relationships.some((r) =>
-    r.type === "partner" && ((r.person1 === a && r.person2 === b) || (r.person1 === b && r.person2 === a)));
+  return Boolean(findUnionByPartners([a, b]));
+}
+
+function partnerRelations() {
+  ensureDomainArrays();
+  return state.project.unions
+    .filter((u) => u.partnerIds.length === 2)
+    .map((u) => ({ id: u.id, type: "partner", person1: u.partnerIds[0], person2: u.partnerIds[1], unionId: u.id }));
+}
+
+function parentChildRelations() {
+  ensureDomainArrays();
+  return state.project.parentages.flatMap((pa) =>
+    pa.parentIds.map((parent) => ({ id: `${pa.id}:${parent}`, type: "parentChild", parent, child: pa.childId, unionId: pa.unionId })));
 }
 
 /* ============================================================
@@ -261,9 +352,7 @@ function addParent(sex) {
   pushHistory();
   const parent = createPerson({ sex, name: sex === "male" ? "父" : "母" });
   state.project.people.push(parent);
-  addRelationship({ type: "parentChild", parent: parent.id, child: child.id });
-  // 与已有的另一位父母自动建立配偶关系
-  existing.forEach((other) => { if (!hasPartner(parent.id, other.id)) addRelationship({ type: "partner", person1: parent.id, person2: other.id }); });
+  setBiologicalParentage(child.id, [...existing.map((p) => p.id), parent.id]);
   state.selectedId = child.id;
   autoLayout(); refresh(); fitView();
   setStatus(sex === "male" ? "已添加父亲" : "已添加母亲");
@@ -278,7 +367,7 @@ function addPartner() {
     sex: person.sex === "male" ? "female" : person.sex === "female" ? "male" : "unknown"
   });
   state.project.people.push(partner);
-  addRelationship({ type: "partner", person1: person.id, person2: partner.id });
+  ensureUnion([person.id, partner.id]);
   state.selectedId = person.id;
   autoLayout(); refresh(); fitView();
   setStatus("已添加配偶");
@@ -304,7 +393,7 @@ function connectPartners(aId, bId) {
   const aAnc = ancestorsWithDepth(aId), bAnc = ancestorsWithDepth(bId);
   if (aAnc.has(bId) || bAnc.has(aId)) { setStatus("直系亲属（父母/子女）不能连为配偶"); return false; }
   pushHistory();
-  addRelationship({ type: "partner", person1: aId, person2: bId });
+  ensureUnion([aId, bId]);
   state.linkMode = null;
   state.selectedId = aId;
   autoLayout(); refresh(); fitView();
@@ -322,8 +411,9 @@ function addChild(sex) {
   const label = sex === "male" ? "儿子" : sex === "female" ? "女儿" : "子女";
   const child = createPerson({ name: label, sex: sex || "unknown" });
   state.project.people.push(child);
-  addRelationship({ type: "parentChild", parent: parent.id, child: child.id });
-  if (coParent) addRelationship({ type: "parentChild", parent: coParent.id, child: child.id });
+  const parentIds = coParent ? [parent.id, coParent.id] : [parent.id];
+  const union = ensureUnion(parentIds);
+  addParentage(parentIds, child.id, union.id);
   state.selectedId = parent.id; // 光标保持在父/母，便于连续添加
   autoLayout(); refresh(); fitView();
   setStatus(coParent ? `已添加${label}，共同父母为 ${displayPersonName(parent)} 与 ${displayPersonName(coParent)}` : `已添加${label}（单亲 / 未知另一方）`);
@@ -367,11 +457,13 @@ function addSibling(sex) {
     const dad = createPerson({ sex: "male", name: "父" });
     const mom = createPerson({ sex: "female", name: "母" });
     state.project.people.push(dad, mom);
-    addRelationship({ type: "partner", person1: dad.id, person2: mom.id });
-    [person, sib].forEach((c) => { addRelationship({ type: "parentChild", parent: dad.id, child: c.id }); addRelationship({ type: "parentChild", parent: mom.id, child: c.id }); });
+    const union = ensureUnion([dad.id, mom.id]);
+    [person, sib].forEach((c) => addParentage([dad.id, mom.id], c.id, union.id));
     setStatus(`已添加${label}并自动补充父母`);
   } else {
-    parents.forEach((p) => addRelationship({ type: "parentChild", parent: p.id, child: sib.id }));
+    const parentIds = parents.map((p) => p.id);
+    const union = ensureUnion(parentIds);
+    addParentage(parentIds, sib.id, union.id);
     setStatus(`已添加${label}`);
   }
   state.selectedId = person.id; // 光标保持在原成员，不随新同胞变更
@@ -394,11 +486,13 @@ function addTwin(sex) {
     const dad = createPerson({ sex: "male", name: "父" });
     const mom = createPerson({ sex: "female", name: "母" });
     state.project.people.push(dad, mom);
-    addRelationship({ type: "partner", person1: dad.id, person2: mom.id });
-    [person, twin].forEach((c) => { addRelationship({ type: "parentChild", parent: dad.id, child: c.id }); addRelationship({ type: "parentChild", parent: mom.id, child: c.id }); });
+    const union = ensureUnion([dad.id, mom.id]);
+    [person, twin].forEach((c) => addParentage([dad.id, mom.id], c.id, union.id));
     setStatus(`已添加${label}并自动补充父母`);
   } else {
-    parents.forEach((p) => addRelationship({ type: "parentChild", parent: p.id, child: twin.id }));
+    const parentIds = parents.map((p) => p.id);
+    const union = ensureUnion(parentIds);
+    addParentage(parentIds, twin.id, union.id);
     setStatus(`已添加${label}`);
   }
   state.selectedId = person.id;
@@ -419,8 +513,13 @@ function deleteSelected() {
   pushHistory();
   const delGroup = p.twinGroup;
   state.project.people = state.project.people.filter((x) => x.id !== p.id);
-  state.project.relationships = state.project.relationships.filter((r) =>
-    r.parent !== p.id && r.child !== p.id && r.person1 !== p.id && r.person2 !== p.id);
+  state.project.parentages = state.project.parentages
+    .filter((pa) => pa.childId !== p.id && !pa.parentIds.includes(p.id))
+    .map((pa) => ({ ...pa, parentIds: pa.parentIds.filter((id) => id !== p.id) }))
+    .filter((pa) => pa.parentIds.length > 0);
+  state.project.unions = state.project.unions
+    .map((u) => ({ ...u, partnerIds: u.partnerIds.filter((id) => id !== p.id) }))
+    .filter((u) => u.partnerIds.length > 0);
   // 清理孤立 twinGroup：同组若只剩 1 人，则该人不再是双胞胎
   if (delGroup) {
     const rest = state.project.people.filter((x) => x.twinGroup === delGroup);
@@ -510,8 +609,8 @@ function removeDiagnosis(v) {
 function computeGenerations() {
   const gen = new Map();
   state.project.people.forEach((p) => gen.set(p.id, 0));
-  const pcs = state.project.relationships.filter((r) => r.type === "parentChild");
-  const partners = state.project.relationships.filter((r) => r.type === "partner");
+  const pcs = parentChildRelations();
+  const partners = partnerRelations();
   const limit = state.project.people.length + 5;
   for (let i = 0; i < limit; i++) {
     let changed = false;
@@ -567,17 +666,21 @@ function normalizeFamilyParents(parents) {
   return parents.length === 1 ? [parents[0].id] : [];
 }
 
-function buildFamilyUnitsFromRelationships() {
+function buildFamilyUnitsFromParentages() {
   const groups = new Map();
-  state.project.people.forEach((child) => {
-    const parents = normalizeFamilyParents(findParents(child.id));
-    if (parents.length === 0) return;
-    const key = coupleKey(parents);
+  ensureDomainArrays();
+  state.project.parentages.forEach((pa) => {
+    const child = getPerson(pa.childId);
+    if (!child || pa.parentIds.length === 0) return;
+    const parents = normalizeFamilyParents(pa.parentIds.map((id) => getPerson(id)).filter(Boolean));
+    const union = state.project.unions.find((u) => u.id === pa.unionId) || ensureUnion(parents);
+    const key = union.id;
     if (!groups.has(key)) {
       groups.set(key, {
-        id: familyUnitId(parents),
-        marriageNodeId: marriageNodeId(parents),
-        parentKey: key,
+        id: `fu:${union.id}`,
+        marriageNodeId: `mn:${union.id}`,
+        parentKey: union.id,
+        unionId: union.id,
         parentIds: parents,
         childIds: []
       });
@@ -610,15 +713,8 @@ function buildFamilyUnitsFromRelationships() {
 }
 
 function syncFamilyUnits() {
-  const units = buildFamilyUnitsFromRelationships();
-  state.familyUnits = units;
-  state.project.familyUnits = units.map((u) => ({
-    id: u.id,
-    marriageNodeId: u.marriageNodeId,
-    parentKey: u.parentKey,
-    parentIds: [...u.parentIds],
-    childIds: [...u.childIds]
-  }));
+  const units = buildFamilyUnitsFromParentages();
+  state.layoutFamilyUnits = units;
   return units;
 }
 
@@ -1056,7 +1152,7 @@ function drawRelationships(root) {
   const marriageNodes = computeMarriageNodes();
 
   // 配偶线：每段婚配关系都先落到一个不可见 marriage node；近亲婚配画双线。
-  state.project.relationships.filter((r) => r.type === "partner").forEach((r) => {
+  partnerRelations().forEach((r) => {
     const a = getPerson(r.person1), b = getPerson(r.person2);
     if (!a || !b) return;
     const route = marriageNodes.get(coupleKey([a.id, b.id]));
@@ -1171,7 +1267,8 @@ function drawSiblingLine(root, f, sibY, fams = []) {
 
   state.project.people.forEach((p) => {
     if (childIdSet.has(p.id)) return;
-    if (Math.abs(p.y - (f.childTopY + R)) > 1) return;
+    const lineTouchesSymbol = sibY >= p.y - R - 2 && sibY <= p.y + R + 2;
+    if (!lineTouchesSymbol) return;
     if (p.x > f.lo && p.x < f.hi) blockers.push({ x: p.x, gap: R + 6 });
   });
   fams.forEach((other) => {
@@ -1207,7 +1304,7 @@ function splitSegmentByBlockers(x1, x2, blockers) {
 
 function computeMarriageNodes() {
   const routes = new Map();
-  const rels = state.project.relationships.filter((r) => r.type === "partner");
+  const rels = partnerRelations();
 
   rels.forEach((r) => {
     const a = getPerson(r.person1), b = getPerson(r.person2);
@@ -1651,7 +1748,7 @@ function onKeyDown(evt) {
 /* ============================================================
    撤销 / 重做
    ============================================================ */
-function snapshot() { syncFamilyUnits(); return JSON.stringify(state.project); }
+function snapshot() { return JSON.stringify(projectForStorage()); }
 function pushHistory() {
   state.history.push(snapshot());
   if (state.history.length > 60) state.history.shift();
@@ -1725,8 +1822,7 @@ function newProject() {
 
 function saveJson() {
   state.project.updatedAt = new Date().toISOString();
-  syncFamilyUnits();
-  const blob = new Blob([JSON.stringify(state.project, null, 2)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify(projectForStorage(), null, 2)], { type: "application/json" });
   download(blob, `${safeName(state.project.title)}_${stamp()}.json`);
   setStatus("项目已保存为 JSON");
 }
@@ -1750,67 +1846,105 @@ function loadJson(evt) {
   reader.readAsText(file, "utf-8");
 }
 
-function normalizeProject(proj) {
-  validateProjectData(proj);
-  const base = createProject();
-  const migratedFrom = proj.version && proj.version !== VERSION ? proj.version : proj.migratedFrom;
+function syncLayoutModel() {
+  ensureDomainArrays();
+  state.project.layout.positions = Object.fromEntries(state.project.people.map((p) => [p.id, { x: p.x || 0, y: p.y || 0, manual: !!p.manual }]));
+}
+
+function syncClinicalModels() {
+  ensureDomainArrays();
+  state.project.phenotypes = state.project.people.map((p) => ({
+    id: `ph_${p.id}`,
+    personId: p.id,
+    status: p.affectedStatus === "carrier" ? "unaffected" : (p.affectedStatus || "unaffected"),
+    diagnoses: Array.isArray(p.diagnoses) ? [...p.diagnoses] : [],
+    ageOfOnset: "",
+    source: ""
+  }));
+  state.project.geneticFindings = state.project.people
+    .filter((p) => p.affectedStatus === "carrier")
+    .map((p) => ({
+      id: `gf_${p.id}`,
+      personId: p.id,
+      status: "carrier",
+      gene: "",
+      variant: "",
+      source: ""
+    }));
+}
+
+function applyLayoutPositions(project) {
+  const positions = project.layout?.positions || {};
+  project.people.forEach((p) => {
+    const pos = positions[p.id];
+    p.x = Number.isFinite(pos?.x) ? pos.x : Number.isFinite(p.x) ? p.x : 0;
+    p.y = Number.isFinite(pos?.y) ? pos.y : Number.isFinite(p.y) ? p.y : 0;
+    p.manual = !!(pos?.manual ?? p.manual);
+  });
+}
+
+function applyClinicalViewCache(project) {
+  const phenotypes = new Map((project.phenotypes || []).map((ph) => [ph.personId, ph]));
+  const carriers = new Set((project.geneticFindings || []).filter((gf) => gf.status === "carrier").map((gf) => gf.personId));
+  project.people.forEach((p) => {
+    const ph = phenotypes.get(p.id);
+    p.affectedStatus = carriers.has(p.id) ? "carrier" : (ph?.status || p.affectedStatus || "unaffected");
+    p.diagnoses = Array.isArray(ph?.diagnoses) ? [...ph.diagnoses] : Array.isArray(p.diagnoses) ? p.diagnoses : [];
+  });
+}
+
+function projectForStorage() {
+  syncLayoutModel();
+  syncClinicalModels();
+  const cleanPeople = state.project.people.map(({ x, y, manual, affectedStatus, diagnoses, ...p }) => ({ ...p }));
   return {
+    ...state.project,
+    schemaVersion: 2,
+    version: VERSION,
+    people: cleanPeople,
+    unions: state.project.unions.map((u) => ({ ...u, partnerIds: [...u.partnerIds] })),
+    parentages: state.project.parentages.map((pa) => ({ ...pa, parentIds: [...pa.parentIds] })),
+    phenotypes: state.project.phenotypes.map((ph) => ({ ...ph, diagnoses: [...ph.diagnoses] })),
+    geneticFindings: state.project.geneticFindings.map((gf) => ({ ...gf })),
+    pregnancies: state.project.pregnancies.map((pg) => ({ ...pg, childIds: [...pg.childIds] })),
+    layout: { positions: { ...state.project.layout.positions } },
+    relationships: undefined,
+    familyUnits: undefined
+  };
+}
+
+function normalizeProject(proj) {
+  const migrated = PedigreeApplication.migrateProjectToSchema2(proj, makeId);
+  PedigreeApplication.validateDomainProject(migrated);
+  const base = createProject();
+  const migratedFrom = migrated.version && migrated.version !== VERSION ? migrated.version : migrated.migratedFrom;
+  const normalized = {
     ...base,
-    ...proj,
-    schemaVersion: 1,
+    ...migrated,
+    schemaVersion: 2,
     version: VERSION,
     ...(migratedFrom ? { migratedFrom } : {}),
-    settings: { ...base.settings, ...(proj.settings || {}) },
-    people: proj.people.map((p, i) => ({
+    settings: { ...base.settings, ...(migrated.settings || {}) },
+    people: migrated.people.map((p, i) => ({
       ...createPerson({ order: i + 1 }),
       ...p,
       diagnoses: Array.isArray(p.diagnoses) ? p.diagnoses : [],
       order: Number.isFinite(p.order) ? p.order : i + 1
     })),
-    relationships: proj.relationships,
-    familyUnits: Array.isArray(proj.familyUnits) ? proj.familyUnits : []
+    unions: migrated.unions.map((u) => PedigreeDomain.normalizeUnion(u)),
+    parentages: migrated.parentages.map((pa) => PedigreeDomain.normalizeParentage(pa)),
+    phenotypes: migrated.phenotypes.map((ph) => PedigreeDomain.normalizePhenotype(ph)),
+    geneticFindings: migrated.geneticFindings.map((gf) => PedigreeDomain.normalizeGeneticFinding(gf)),
+    pregnancies: migrated.pregnancies.map((pg) => PedigreeDomain.normalizePregnancy(pg)),
+    layout: migrated.layout || { positions: {} }
   };
+  applyLayoutPositions(normalized);
+  applyClinicalViewCache(normalized);
+  return normalized;
 }
 
 function validateProjectData(proj) {
-  if (!proj || !Array.isArray(proj.people) || !Array.isArray(proj.relationships)) throw new Error("invalid");
-  const ids = new Set();
-  proj.people.forEach((p, i) => {
-    if (!p || typeof p.id !== "string" || !p.id.trim()) throw new Error(`person id missing at ${i + 1}`);
-    if (ids.has(p.id)) throw new Error(`duplicate person id: ${p.id}`);
-    ids.add(p.id);
-    if (p.sex && !["male", "female", "unknown"].includes(p.sex)) throw new Error(`invalid sex: ${p.sex}`);
-    if (p.affectedStatus && !["unaffected", "affected", "suspected", "carrier", "unknown"].includes(p.affectedStatus)) {
-      throw new Error(`invalid affectedStatus: ${p.affectedStatus}`);
-    }
-  });
-
-  const probands = proj.people.filter((p) => p.proband);
-  if (probands.length > 1) throw new Error("multiple probands");
-
-  const relKeys = new Set();
-  const parentEdges = [];
-  proj.relationships.forEach((r, i) => {
-    if (!r || typeof r.type !== "string") throw new Error(`relationship type missing at ${i + 1}`);
-    if (r.type === "parentChild") {
-      if (!ids.has(r.parent) || !ids.has(r.child)) throw new Error(`broken parentChild reference at ${i + 1}`);
-      if (r.parent === r.child) throw new Error("person cannot be own parent");
-      const key = `parentChild:${r.parent}:${r.child}`;
-      if (relKeys.has(key)) throw new Error(`duplicate relationship: ${key}`);
-      relKeys.add(key);
-      parentEdges.push([r.parent, r.child]);
-    } else if (r.type === "partner") {
-      if (!ids.has(r.person1) || !ids.has(r.person2)) throw new Error(`broken partner reference at ${i + 1}`);
-      if (r.person1 === r.person2) throw new Error("person cannot be own partner");
-      const pair = [r.person1, r.person2].sort();
-      const key = `partner:${pair[0]}:${pair[1]}`;
-      if (relKeys.has(key)) throw new Error(`duplicate relationship: ${key}`);
-      relKeys.add(key);
-    } else {
-      throw new Error(`unknown relationship type: ${r.type}`);
-    }
-  });
-  assertNoParentCycle(parentEdges);
+  PedigreeApplication.validateDomainProject(PedigreeApplication.migrateProjectToSchema2(proj, makeId));
 }
 
 function assertNoParentCycle(edges) {
@@ -1973,7 +2107,7 @@ function lineageSide(probandId, relativeId) {
     if (!startId) return false;
     const adj = new Map();
     state.project.people.forEach((p) => adj.set(p.id, new Set()));
-    state.project.relationships.filter((r) => r.type === "parentChild").forEach((r) => {
+    parentChildRelations().forEach((r) => {
       if (adj.has(r.parent) && adj.has(r.child)) { adj.get(r.parent).add(r.child); adj.get(r.child).add(r.parent); }
     });
     const seen = new Set([probandId, blockId].filter(Boolean));
