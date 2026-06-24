@@ -1,7 +1,7 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 5.0
+   精神科遗传家族谱系图绘制工具 5.1
    纯前端、本地优先。本版新增：双胞胎（同卵/异卵）、携带者圆点、
    近亲婚配自动双线、拖动自由摆放开关、一键生成家族史文字。
    4.1：连线 T 形修复；新增"与已选成员结婚"连接已有节点为配偶；
@@ -10,11 +10,12 @@
    4.7：婚配线固定同代水平连接；同胞线仅覆盖子女范围并使用线路层避让。
    4.8：稳定性修复：多配偶子女归属选择、独生子女断线、校验与撤销/存储修复。
    5.0：显式领域模型：Union / Parentage / Phenotype / GeneticFinding / Layout。
+   5.1：建立 graph engine 分层骨架，移除旧 person-person edge 与 tree layout 主体。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "5.0";
+const VERSION = "5.1";
 
 // 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
 const PLACEHOLDER_NAMES = new Set([
@@ -273,26 +274,18 @@ function setBiologicalParentage(childId, parentIds) {
   return addParentage(ordered, childId, union.id);
 }
 
-function addRelationship(rel) {
-  if (rel.type === "partner") {
-    ensureUnion([rel.person1, rel.person2]);
-  } else if (rel.type === "parentChild") {
-    addParentage([rel.parent], rel.child);
-  }
-}
-
 function findParents(id) {
   ensureDomainArrays();
   return state.project.parentages
     .filter((pa) => pa.childId === id)
-    .flatMap((pa) => pa.parentIds)
+    .flatMap((pa) => parentIdsForParentage(pa))
     .filter((v, i, arr) => arr.indexOf(v) === i)
     .map((parentId) => getPerson(parentId)).filter(Boolean);
 }
 function findChildren(id) {
   ensureDomainArrays();
   return state.project.parentages
-    .filter((pa) => pa.parentIds.includes(id))
+    .filter((pa) => parentIdsForParentage(pa).includes(id))
     .map((pa) => getPerson(pa.childId)).filter(Boolean);
 }
 function findPartners(id) {
@@ -305,17 +298,19 @@ function hasPartner(a, b) {
   return Boolean(findUnionByPartners([a, b]));
 }
 
-function partnerRelations() {
+function getUnion(unionId) {
   ensureDomainArrays();
-  return state.project.unions
-    .filter((u) => u.partnerIds.length === 2)
-    .map((u) => ({ id: u.id, type: "partner", person1: u.partnerIds[0], person2: u.partnerIds[1], unionId: u.id }));
+  return state.project.unions.find((u) => u.id === unionId) || null;
 }
 
-function parentChildRelations() {
+function parentIdsForParentage(parentage) {
+  const union = getUnion(parentage.unionId);
+  return union ? union.partnerIds : [];
+}
+
+function partnerUnions() {
   ensureDomainArrays();
-  return state.project.parentages.flatMap((pa) =>
-    pa.parentIds.map((parent) => ({ id: `${pa.id}:${parent}`, type: "parentChild", parent, child: pa.childId, unionId: pa.unionId })));
+  return state.project.unions.filter((u) => u.partnerIds.length === 2);
 }
 
 /* ============================================================
@@ -609,21 +604,23 @@ function removeDiagnosis(v) {
 function computeGenerations() {
   const gen = new Map();
   state.project.people.forEach((p) => gen.set(p.id, 0));
-  const pcs = parentChildRelations();
-  const partners = partnerRelations();
   const limit = state.project.people.length + 5;
   for (let i = 0; i < limit; i++) {
     let changed = false;
-    pcs.forEach((r) => {
-      if (!gen.has(r.parent) || !gen.has(r.child)) return;
-      const g = gen.get(r.parent) + 1;
-      if (g > gen.get(r.child)) { gen.set(r.child, g); changed = true; }
+    state.project.parentages.forEach((parentage) => {
+      const childId = parentage.childId;
+      parentIdsForParentage(parentage).forEach((parentId) => {
+        if (!gen.has(parentId) || !gen.has(childId)) return;
+        const g = gen.get(parentId) + 1;
+        if (g > gen.get(childId)) { gen.set(childId, g); changed = true; }
+      });
     });
-    partners.forEach((r) => {
-      if (!gen.has(r.person1) || !gen.has(r.person2)) return;
-      const m = Math.max(gen.get(r.person1), gen.get(r.person2));
-      if (gen.get(r.person1) !== m) { gen.set(r.person1, m); changed = true; }
-      if (gen.get(r.person2) !== m) { gen.set(r.person2, m); changed = true; }
+    partnerUnions().forEach((union) => {
+      const [aId, bId] = union.partnerIds;
+      if (!gen.has(aId) || !gen.has(bId)) return;
+      const m = Math.max(gen.get(aId), gen.get(bId));
+      if (gen.get(aId) !== m) { gen.set(aId, m); changed = true; }
+      if (gen.get(bId) !== m) { gen.set(bId, m); changed = true; }
     });
     if (!changed) break;
   }
@@ -671,9 +668,9 @@ function buildFamilyUnitsFromParentages() {
   ensureDomainArrays();
   state.project.parentages.forEach((pa) => {
     const child = getPerson(pa.childId);
-    if (!child || pa.parentIds.length === 0) return;
-    const parents = normalizeFamilyParents(pa.parentIds.map((id) => getPerson(id)).filter(Boolean));
-    const union = state.project.unions.find((u) => u.id === pa.unionId) || ensureUnion(parents);
+    const union = getUnion(pa.unionId);
+    if (!child || !union || union.partnerIds.length === 0) return;
+    const parents = normalizeFamilyParents(union.partnerIds.map((id) => getPerson(id)).filter(Boolean));
     const key = union.id;
     if (!groups.has(key)) {
       groups.set(key, {
@@ -723,332 +720,17 @@ function collectFamilyUnits() {
 }
 
 /* ============================================================
-   可靠的递归自动排版（family-forest tidy tree）
+   旧 tree layout 已移除
    ============================================================ */
-/*
-  排版采用「节点级重心法」(layered barycenter)：
-  - 把每对配偶合并为一个夫妻超级节点，单身者为单节点；
-  - 按代际分层，节点之间用父代/子代重心反复排序，再顺序打包（天然无重叠）；
-  - 由于夫妻节点可同时挂在双方父母之下，双方的兄弟姐妹会被分别排到夫妻两侧，
-    从而避免「父母双方的兄弟姐妹连线相互交叉」的问题；
-  - 最后自底向上把父母对齐到子女重心，保证下降竖线对准同胞横线中点。
-*/
 function autoLayout() {
-  const people = state.project.people;
-  if (people.length === 0) return;
   const gen = computeGenerations();
   state.genMap = gen;
-  const familyUnits = syncFamilyUnits();
-  // 记录手动摆放节点的位置，排版结束后还原（自由摆放不被自动布局覆盖）
-  const manualPos = new Map();
-  people.forEach((p) => { if (p.manual) manualPos.set(p.id, { x: p.x, y: p.y }); });
-
-  const SUB_GAP = PERSON_GAP * 0.35;
-  const singleW = PERSON_GAP;
-  const coupleW = PERSON_GAP * 2;
-
-  /* 1. 构建节点：夫妻超级节点 or 单节点 */
-  const nodeOf = new Map();
-  const nodes = [];
-  const assigned = new Set();
-  people.forEach((p) => {
-    if (assigned.has(p.id)) return;
-    const partner = findPartners(p.id).find((q) => !assigned.has(q.id));
-    if (partner) {
-      const [l, r] = orderCouple(p.id, partner.id);
-      const node = { members: [l, r], gen: gen.get(l), cx: 0, width: coupleW };
-      nodes.push(node); nodeOf.set(l, node); nodeOf.set(r, node);
-      assigned.add(l); assigned.add(r);
-    } else {
-      const node = { members: [p.id], gen: gen.get(p.id), cx: 0, width: singleW };
-      nodes.push(node); nodeOf.set(p.id, node); assigned.add(p.id);
-    }
-  });
-
-  /* 2. 节点级父子边（去重，允许一个节点有多个父节点） */
-  const parentsOf = new Map(); nodes.forEach((n) => parentsOf.set(n, new Set()));
-  const childrenOf = new Map(); nodes.forEach((n) => childrenOf.set(n, new Set()));
-  familyUnits.forEach((u) => {
-    const parentNodes = [...new Set(u.parentIds.map((id) => nodeOf.get(id)).filter(Boolean))];
-    const childNodes = [...new Set(u.childIds.map((id) => nodeOf.get(id)).filter(Boolean))];
-    parentNodes.forEach((pn) => {
-      childNodes.forEach((cn) => {
-        if (pn && cn && pn !== cn) { parentsOf.get(cn).add(pn); childrenOf.get(pn).add(cn); }
-      });
-    });
-  });
-
-  /* 3. 分代 */
-  const maxGen = Math.max(...nodes.map((n) => n.gen));
-  const genNodes = [];
-  for (let g = 0; g <= maxGen; g++) genNodes[g] = [];
-  nodes.forEach((n) => genNodes[n.gen].push(n));
-  const baseOrder = (n) => Math.min(...n.members.map((id) => getPerson(id).order));
-  genNodes.forEach((arr) => arr.sort((a, b) => baseOrder(a) - baseOrder(b)));
-
-  const pack = (g) => {
-    let x = 0;
-    genNodes[g].forEach((n) => { n.cx = x + n.width / 2; x += n.width + SUB_GAP; });
-    // 将该代整体居中到 0，使各代坐标可跨代比较（重心法的前提）
-    const m = avg(genNodes[g].map((n) => n.cx));
-    genNodes[g].forEach((n) => { n.cx -= m; });
-  };
-  const baryParents = (n) => { const a = [...parentsOf.get(n)]; return a.length ? avg(a.map((p) => p.cx)) : null; };
-  const baryChildren = (n) => { const a = [...childrenOf.get(n)]; return a.length ? avg(a.map((c) => c.cx)) : null; };
-
-  for (let g = 0; g <= maxGen; g++) pack(g);
-
-  // 夫妻节点向其血缘一侧轻微偏置：让该成员的兄弟姐妹排到该成员的外侧，
-  // 避免「同胞连线穿过配偶」（如先证者同时有配偶和同胞时）。
-  const SIDE_BIAS = 0.5;
-  const sideBias = (n) => {
-    if (n.members.length !== 2) return 0;
-    const [l, r] = n.members;
-    const lp = findParents(l).length > 0, rp = findParents(r).length > 0;
-    if (lp && !rp) return SIDE_BIAS;   // 血缘在左 → 夫妻排到其同胞右侧
-    if (rp && !lp) return -SIDE_BIAS;  // 血缘在右 → 夫妻排到其同胞左侧
-    return 0;
-  };
-  const keyDown = (n) => (baryParents(n) == null ? n.cx : baryParents(n)) + sideBias(n);
-  // 上行排序：有子女用子女重心；叶节点改用父代重心（而非 cx），
-  // 防止兄弟叶节点以自身位置作 key 时排到「兄弟+配偶」夫妻节点右侧
-  const keyUp = (n) => {
-    const bc = baryChildren(n), bp = baryParents(n);
-    return (bc != null ? bc : bp != null ? bp : n.cx) + sideBias(n);
-  };
-
-  /* 4. 重心迭代：下行按父代重心、上行按子代重心，反复排序+打包 */
-  for (let iter = 0; iter < 6; iter++) {
-    for (let g = 1; g <= maxGen; g++) { genNodes[g].sort((a, b) => keyDown(a) - keyDown(b) || baseOrder(a) - baseOrder(b)); pack(g); }
-    for (let g = maxGen - 1; g >= 0; g--) { genNodes[g].sort((a, b) => keyUp(a) - keyUp(b) || baseOrder(a) - baseOrder(b)); pack(g); }
-  }
-
-  /* 5. 固定步骤4确定的左右顺序，先按序均匀打包，再做带约束的重心松弛：
-        每个节点向「父代+子代重心」靠拢，但被左右相邻节点夹住，既对中又不重叠、不改顺序。 */
-  for (let g = 0; g <= maxGen; g++) pack(g);
-  const minGap = (a, b) => a.width / 2 + SUB_GAP + b.width / 2;
-  for (let iter = 0; iter < 10; iter++) {
-    for (let g = 0; g <= maxGen; g++) {
-      const arr = genNodes[g];
-      for (let i = 0; i < arr.length; i++) {
-        const n = arr[i];
-        const bp = baryParents(n), bc = baryChildren(n);
-        let target = null;
-        if (bp != null && bc != null) target = (bp + bc) / 2;
-        else if (bp != null) target = bp;
-        else if (bc != null) target = bc;
-        if (target == null) continue;
-        const lo = i > 0 ? arr[i - 1].cx + minGap(arr[i - 1], n) : -Infinity;
-        const hi = i < arr.length - 1 ? arr[i + 1].cx - minGap(n, arr[i + 1]) : Infinity;
-        n.cx = clamp(target, lo, hi);
-      }
-    }
-  }
-
-  /* 5c. 从上往下显式居中：用血缘子女本人的锚点对齐父母婚配中心。
-         如果子女已经成家，不能用「子女+配偶」夫妻超级节点的中心，否则父母下降线会折到
-         夫妻中心再横接血缘子女；临床家系图规范应接到血缘子女本人。*/
-  alignFamilyChildAnchors(familyUnits, nodeOf, childrenOf, maxGen);
-
-  enforceSiblingBirthOrder(nodes, nodeOf, childrenOf);
-  // 同胞顺序重排会移动夫妻节点，需再次按血缘子女锚点收敛。
-  alignFamilyChildAnchors(familyUnits, nodeOf, childrenOf, maxGen);
-  resolveNodeOverlaps(nodes, childrenOf);
-  alignSingleParentOnlyChildren(familyUnits, nodeOf, childrenOf);
-
-  /* 6. 写回成员坐标 */
-  nodes.forEach((n) => {
-    const y = n.gen * GENERATION_GAP;
-    if (n.members.length === 2) {
-      const [l, r] = n.members;
-      getPerson(l).x = n.cx - PERSON_GAP / 2; getPerson(l).y = y;
-      getPerson(r).x = n.cx + PERSON_GAP / 2; getPerson(r).y = y;
-    } else {
-      const p = getPerson(n.members[0]);
-      p.x = n.cx; p.y = y;
-    }
-  });
-
-  // 还原手动摆放位置（在归一化前还原，使其与其他节点一同平移，保持相对关系）
-  manualPos.forEach((pos, id) => { const p = getPerson(id); if (p) { p.x = pos.x; p.y = pos.y; } });
-  normalizeToOrigin();
+  syncFamilyUnits();
   computeNumbering(gen);
 }
 
-function alignSingleParentOnlyChildren(familyUnits, nodeOf, childrenOf) {
-  familyUnits.forEach((u) => {
-    if (u.parentIds.length !== 1 || u.childIds.length !== 1) return;
-    const child = getPerson(u.childIds[0]);
-    if (child?.manual) return;
-    const parentNode = nodeOf.get(u.parentIds[0]);
-    const childNode = nodeOf.get(u.childIds[0]);
-    if (!parentNode || !childNode || parentNode === childNode) return;
-    const target = anchorXForMemberNode(parentNode, u.parentIds[0]);
-    const current = anchorXForMemberNode(childNode, u.childIds[0]);
-    moveNodeWithDescendants(childNode, target - current, childrenOf);
-  });
-}
-
-function anchorXForMemberNode(node, memberId) {
-  if (!node || node.members.length === 1) return node ? node.cx : 0;
-  const [l, r] = node.members;
-  if (memberId === l) return node.cx - PERSON_GAP / 2;
-  if (memberId === r) return node.cx + PERSON_GAP / 2;
-  return node.cx;
-}
-
-function alignFamilyChildAnchors(familyUnits, nodeOf, childrenOf, maxGen) {
-  for (let g = 0; g < maxGen; g++) {
-    familyUnits.forEach((u) => {
-      const parentNodes = [...new Set(u.parentIds.map((id) => nodeOf.get(id)).filter(Boolean))];
-      const childItems = u.childIds
-        .map((id) => ({ id, node: nodeOf.get(id) }))
-        .filter((item) => item.node && item.node.gen === g + 1);
-      if (parentNodes.length === 0 || childItems.length === 0) return;
-
-      const parentCenter = avg(parentNodes.map((n) => n.cx));
-      const childCenter = avg(childItems.map((item) => anchorXForMemberNode(item.node, item.id)));
-      const diff = parentCenter - childCenter;
-      if (Math.abs(diff) < 0.1) return;
-
-      const moved = new Set();
-      childItems.forEach((item) => {
-        if (moved.has(item.node)) return;
-        moved.add(item.node);
-        moveNodeWithDescendants(item.node, diff, childrenOf);
-      });
-    });
-  }
-}
-
-function setMemberAnchorX(node, memberId, targetX) {
-  if (!node) return;
-  if (node.members.length === 1) { node.cx = targetX; return; }
-  const [l, r] = node.members;
-  if (memberId === l) node.cx = targetX + PERSON_GAP / 2;
-  else if (memberId === r) node.cx = targetX - PERSON_GAP / 2;
-  else node.cx = targetX;
-}
-
-function shiftDescendantNodes(node, dx, childrenOf, seen = new Set()) {
-  const kids = [...(childrenOf.get(node) || [])];
-  kids.forEach((childNode) => {
-    if (seen.has(childNode)) return;
-    seen.add(childNode);
-    childNode.cx += dx;
-    shiftDescendantNodes(childNode, dx, childrenOf, seen);
-  });
-}
-
-function moveNodeWithDescendants(node, dx, childrenOf) {
-  if (!node || Math.abs(dx) < 0.1) return;
-  node.cx += dx;
-  shiftDescendantNodes(node, dx, childrenOf);
-}
-
-function resolveNodeOverlaps(nodes, childrenOf) {
-  const rows = new Map();
-  nodes.forEach((n) => {
-    if (!rows.has(n.gen)) rows.set(n.gen, []);
-    rows.get(n.gen).push(n);
-  });
-  rows.forEach((row) => {
-    row.sort((a, b) => a.cx - b.cx || Math.min(...a.members.map((id) => getPerson(id).order)) - Math.min(...b.members.map((id) => getPerson(id).order)));
-    for (let i = 1; i < row.length; i++) {
-      const prev = row[i - 1], cur = row[i];
-      const minGap = prev.width / 2 + PERSON_GAP * 0.35 + cur.width / 2;
-      const minCx = prev.cx + minGap;
-      if (cur.cx < minCx) moveNodeWithDescendants(cur, minCx - cur.cx, childrenOf);
-    }
-  });
-}
-
-function enforceSiblingBirthOrder(nodes, nodeOf, childrenOf) {
-  const units = collectFamilyUnits();
-  const applied = new Set();
-  const LARGE_SIBLING_COUNT = 6;
-  const SIBLING_GROUP_SIZE = 3;
-  const LARGE_SIBLING_GAP = PERSON_GAP * 0.28;
-
-  units.forEach((u) => {
-    const items = u.children
-      .map((child) => ({ child, node: nodeOf.get(child.id) }))
-      .filter((item) => item.node);
-    if (items.length < 2) return;
-
-    const uniqueNodes = new Set(items.map((item) => item.node));
-    if (uniqueNodes.size !== items.length) return;
-
-    const currentSlots = items
-      .map((item) => anchorXForMemberNode(item.node, item.child.id))
-      .sort((a, b) => a - b);
-    const ordered = [...items].sort((a, b) => a.child.order - b.child.order);
-
-    ordered.forEach((item, idx) => {
-      const key = `${u.parentIds.join("|")}→${item.child.id}`;
-      if (applied.has(key)) return;
-      applied.add(key);
-      const before = item.node.cx;
-      setMemberAnchorX(item.node, item.child.id, currentSlots[idx]);
-      const dx = item.node.cx - before;
-      shiftDescendantNodes(item.node, dx, childrenOf);
-    });
-
-    if (ordered.length >= LARGE_SIBLING_COUNT) {
-      ordered.forEach((item, idx) => {
-        const groupsBefore = Math.floor(idx / SIBLING_GROUP_SIZE);
-        if (groupsBefore === 0) return;
-        const dx = groupsBefore * LARGE_SIBLING_GAP;
-        moveNodeWithDescendants(item.node, dx, childrenOf);
-      });
-    }
-  });
-
-  // Repack each generation after slot permutation, moving whole couple nodes together.
-  const rows = new Map();
-  nodes.forEach((n) => {
-    if (!rows.has(n.gen)) rows.set(n.gen, []);
-    rows.get(n.gen).push(n);
-  });
-  rows.forEach((row) => {
-    row.sort((a, b) => a.cx - b.cx);
-    for (let i = 1; i < row.length; i++) {
-      const prev = row[i - 1], cur = row[i];
-      const minGap = prev.width / 2 + PERSON_GAP * 0.35 + cur.width / 2;
-      const minCx = prev.cx + minGap;
-      if (cur.cx < minCx) moveNodeWithDescendants(cur, minCx - cur.cx, childrenOf);
-    }
-  });
-}
-
-function resolveOverlaps(gen) {
-  const rows = new Map();
-  state.project.people.forEach((p) => {
-    const g = gen.get(p.id) ?? 0;
-    if (!rows.has(g)) rows.set(g, []);
-    rows.get(g).push(p);
-  });
-  rows.forEach((row) => {
-    row.sort((a, b) => a.x - b.x || a.order - b.order);
-    const minGap = PERSON_GAP * 0.96;
-    for (let i = 1; i < row.length; i++) {
-      const gapNeed = row[i - 1].x + minGap;
-      if (row[i].x < gapNeed) {
-        const shift = gapNeed - row[i].x;
-        // 整块右推：当前及其右侧全部平移，保持右侧家庭内部对齐不被破坏
-        for (let j = i; j < row.length; j++) row[j].x += shift;
-      }
-    }
-  });
-}
-
 function normalizeToOrigin() {
-  const xs = state.project.people.map((p) => p.x);
-  const ys = state.project.people.map((p) => p.y);
-  if (xs.length === 0) return;
-  const minX = Math.min(...xs), minY = Math.min(...ys);
-  const padX = 120, padY = 120;
-  state.project.people.forEach((p) => { p.x = p.x - minX + padX; p.y = p.y - minY + padY; });
+  // 坐标归一化属于旧 tree layout 后处理，已从 legacy 入口移除。
 }
 
 function computeNumbering(gen) {
@@ -1152,8 +834,9 @@ function drawRelationships(root) {
   const marriageNodes = computeMarriageNodes();
 
   // 配偶线：每段婚配关系都先落到一个不可见 marriage node；近亲婚配画双线。
-  partnerRelations().forEach((r) => {
-    const a = getPerson(r.person1), b = getPerson(r.person2);
+  partnerUnions().forEach((union) => {
+    const [aId, bId] = union.partnerIds;
+    const a = getPerson(aId), b = getPerson(bId);
     if (!a || !b) return;
     const route = marriageNodes.get(coupleKey([a.id, b.id]));
     const consang = areConsanguineous(a.id, b.id);
@@ -1304,10 +987,10 @@ function splitSegmentByBlockers(x1, x2, blockers) {
 
 function computeMarriageNodes() {
   const routes = new Map();
-  const rels = partnerRelations();
 
-  rels.forEach((r) => {
-    const a = getPerson(r.person1), b = getPerson(r.person2);
+  partnerUnions().forEach((union) => {
+    const [aId, bId] = union.partnerIds;
+    const a = getPerson(aId), b = getPerson(bId);
     if (!a || !b) return;
     const [l, rt] = a.x <= b.x ? [a, b] : [b, a];
     const key = coupleKey([a.id, b.id]);
@@ -1907,9 +1590,7 @@ function projectForStorage() {
     phenotypes: state.project.phenotypes.map((ph) => ({ ...ph, diagnoses: [...ph.diagnoses] })),
     geneticFindings: state.project.geneticFindings.map((gf) => ({ ...gf })),
     pregnancies: state.project.pregnancies.map((pg) => ({ ...pg, childIds: [...pg.childIds] })),
-    layout: { positions: { ...state.project.layout.positions } },
-    relationships: undefined,
-    familyUnits: undefined
+    layout: { positions: { ...state.project.layout.positions } }
   };
 }
 
@@ -1945,25 +1626,6 @@ function normalizeProject(proj) {
 
 function validateProjectData(proj) {
   PedigreeApplication.validateDomainProject(PedigreeApplication.migrateProjectToSchema2(proj, makeId));
-}
-
-function assertNoParentCycle(edges) {
-  const graph = new Map();
-  edges.forEach(([parent, child]) => {
-    if (!graph.has(parent)) graph.set(parent, []);
-    graph.get(parent).push(child);
-  });
-  const visiting = new Set();
-  const done = new Set();
-  function visit(id) {
-    if (visiting.has(id)) throw new Error("parentChild cycle detected");
-    if (done.has(id)) return;
-    visiting.add(id);
-    (graph.get(id) || []).forEach(visit);
-    visiting.delete(id);
-    done.add(id);
-  }
-  [...graph.keys()].forEach(visit);
 }
 
 /* ============================================================
@@ -2103,12 +1765,18 @@ function clinicalDegree(probandId, id) {
 function lineageSide(probandId, relativeId) {
   const father = findParents(probandId).find((p) => p.sex === "male");
   const mother = findParents(probandId).find((p) => p.sex === "female");
-  const reach = (startId, blockId) => {
+    const reach = (startId, blockId) => {
     if (!startId) return false;
     const adj = new Map();
     state.project.people.forEach((p) => adj.set(p.id, new Set()));
-    parentChildRelations().forEach((r) => {
-      if (adj.has(r.parent) && adj.has(r.child)) { adj.get(r.parent).add(r.child); adj.get(r.child).add(r.parent); }
+    state.project.parentages.forEach((parentage) => {
+      const childId = parentage.childId;
+      parentIdsForParentage(parentage).forEach((parentId) => {
+        if (adj.has(parentId) && adj.has(childId)) {
+          adj.get(parentId).add(childId);
+          adj.get(childId).add(parentId);
+        }
+      });
     });
     const seen = new Set([probandId, blockId].filter(Boolean));
     const q = [startId]; seen.add(startId);

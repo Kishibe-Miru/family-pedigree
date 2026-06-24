@@ -31,12 +31,17 @@ function validateDomainProject(project) {
 
   const parentageKeys = new Set();
   const parentEdges = [];
+  const unionPartnersById = new Map(project.unions.map((u) => [u.id, u.partnerIds]));
   project.parentages.forEach((pa, i) => {
     if (!pa?.id) throw new Error(`parentage id missing at ${i + 1}`);
     if (!unions.has(pa.unionId)) throw new Error(`broken parentage union reference: ${pa.unionId}`);
     if (!people.has(pa.childId)) throw new Error(`broken parentage child reference: ${pa.childId}`);
     if (!Array.isArray(pa.parentIds) || pa.parentIds.length === 0 || pa.parentIds.length > 2) throw new Error(`invalid parentage parents at ${i + 1}`);
-    pa.parentIds.forEach((id) => {
+    const unionPartnerIds = unionPartnersById.get(pa.unionId) || [];
+    const parentKey = [...pa.parentIds].sort().join("|");
+    const unionKey = [...unionPartnerIds].sort().join("|");
+    if (parentKey !== unionKey) throw new Error(`parentage parents must match union partners: ${pa.id}`);
+    unionPartnerIds.forEach((id) => {
       if (!people.has(id)) throw new Error(`broken parentage parent reference: ${id}`);
       if (id === pa.childId) throw new Error("person cannot be own parent");
       parentEdges.push([id, pa.childId]);

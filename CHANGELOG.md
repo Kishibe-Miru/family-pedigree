@@ -1,10 +1,18 @@
 # 更新记录
 
+## v5.1 - 2026-06-24
+
+- 新增 `src/` 分层工程骨架：`model`、`layout`、`render`、`rules`、`core`。
+- 引入 `Person`、`UnionNode`、`PedigreeGraph` 语义模型。
+- 建立 `validateGraph -> computeLayout -> render` 的 `buildPedigree` 单向 pipeline。
+- 移除运行时 person-person edge 视图，亲子来源改为通过 `parentage.unionId -> union.partnerIds`。
+- 移除旧 `family-forest tidy tree` 自动排版主体，避免 tree layout 与 graph model 并存。
+
 ## v5.0 - 2026-06-23
 
 - 建立显式领域模型基础：`Union`、`Parentage`、表型与遗传状态拆分。
 - 新增 `domain/`、`layout/`、`application/`、`ui/` 目录边界。
-- 旧版 `people + relationships` JSON 加载时迁移到 schemaVersion 2。
+- 核心数据结构改为显式 `unions + parentages`，旧树结构 JSON 需要先转换为 schemaVersion 2。
 - 布局坐标从临床数据字段中拆出，进入 `layout.positions`。
 
 ## v4.8 - 2026-06-23
