@@ -2,6 +2,7 @@
 .agents/
 .codex/
 .claude/
+.playwright-cli/
 
 # Local archive/source folders kept outside the published Git tree
 /2026家族谱系图*/

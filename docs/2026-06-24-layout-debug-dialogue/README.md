@@ -4,6 +4,36 @@
 
 本文档用于后续重新分析今天围绕 5.0/5.1 自动排版规则的讨论、失败案例、修改思路和最终遗留问题。它不是修复方案，而是把今天的判断过程和产生的问题完整留档。
 
+## STEP 24 - P0 配偶来源家庭共享坐标修复
+
+本步骤修复“配偶来源家庭”在布局过程中崩溃的问题。
+
+问题根因是同一个共享个体同时出现在婚姻 `CoupleBox` 与来源家庭叶子 `PersonBox` 中，并在横向平移或纵向下移后被两处独立写回坐标，导致来源家庭父母下降线与共享个体锚点漂移。
+
+已完成的代码调整：
+
+- `familyForest.ts` 新增 `OriginLink`，`buildForest()` 返回 `{ roots, originLinks }`，显式记录婚姻盒、来源家庭根盒与共享人 id。
+- `Box` 增加 `exitMember`，来源家庭根盒标记其出口共享成员。
+- `coordinateSolver.ts` 删除旧的 `embedOriginFamilies`、`resolveOriginConflicts` 与 `nudgeOriginOutward`。
+- 新增 `reconcileOrigins()`，对每条 `OriginLink` 同时对齐共享人的 `x` 与 `generation`，并迭代到不动点。
+- 当来源家庭被婚姻锚点钉住后仍无法通过同代分离收敛时，下移承载该婚姻的核心 `FamilyBox`，而不是自由移动来源家庭。
+- `writeBackCoordinates()` 对 `OriginLink` 中的共享个体只从婚姻 `CoupleBox` 写回一次，跳过来源家庭叶子的重复写回。
+- `validation.ts` 增加 origin link 断言：来源家庭内共享人的 `x/generation` 必须与婚姻盒内共享人一致。
+- `resolveGenerationOverlaps()` 的可移动盒集合调整为根盒与展开的 `FamilyBox`，避免单独移动家庭内部叶子破坏刚体。
+
+已新增测试覆盖：
+
+- I1/I2 生 II1、II2、II4；II2 与 II3 结婚；II3 来源于 I3/I4 的复现场景。
+- 单亲家庭 `[string]` union。
+- 一人多配偶 / 半同胞。
+- 三代且孙辈已婚。
+- 同代多个独立根。
+
+验收结果：
+
+- `npm run typecheck` 通过。
+- `npm test` 通过，7 个测试全部通过。
+
 ## 相关图片
 
 图片已复制到本文档同目录：
@@ -424,6 +454,232 @@ PedigreeGraph -> buildPedigree(graph) -> SVG string
 - Rendering contains no graph logic.
 
 该检查作为“轻量架构防护层”，用于防止 layout/render 再次耦合。
+
+### STEP 18 - 占位盒模型准备
+
+本步骤开始落实“占位盒 + 降级阶梯”布局路线中的准备阶段。
+
+已新增 `src/layout/boxModel.ts`：
+
+- 定义布局常量：`NODE_SIZE`、`PERSON_GAP`、`SLOT`、`MARRIAGE_GAP`、`SIBLING_GAP`、`MIN_GAP`、`GENERATION_GAP`
+- 定义 `Box` 中间结构
+- 定义 `createPersonBox(personId, generation)`
+
+已更新 `src/layout/coordinateSolver.ts`：
+
+- 新增 `buildInitialPersonBoxes(graph)`
+- `assignCoordinates(graph)` 先构建独立 `Box[]` 中间层
+- 当前仍只把顺序写回 `birthOrder`，不把布局盒坐标写入领域模型
+
+已更新 `src/layout/crossingReducer.ts`：
+
+- 按 `birthOrder` 稳定排序每个 Union 的 `childrenMap`
+- 不分配坐标，保持 crossing reduction 与 coordinate assignment 分层
+
+本步骤的重点是把“人物语义对象”和“布局占位盒”分离，后续算法只移动盒子，避免直接改人物内部锚点。
+
+### STEP 19 - 世代分层与 FamilyBox 森林
+
+本步骤落实“占位盒 + 降级阶梯”路线的前两步。
+
+#### Step 1 - 巩固 assignLayers
+
+已更新 `src/layout/layerAssigner.ts`：
+
+- 所有人物 generation 先重置为 0
+- 基于 `childrenMap` 做最长路径分层
+- 子代满足 `child.generation = max(parent.generation) + 1`
+- 配偶双方取最大 generation 拉平到同代
+- 新增 `formatGenerations(graph)`，用于验收打印每人的 generation
+
+#### Step 2 - 构建 FamilyBox 森林
+
+已新增 `src/layout/familyForest.ts`：
+
+- `buildForest(graph)`：从 `PedigreeGraph` 构建 `Box[]` 森林
+- `formatForest(boxes)`：递归打印森林缩进树，便于人工验收
+- 根节点选择：partners 都没有血缘父母的 Union
+- 兜底孤立根：没有 Union、没有父母、未访问过的顶层个体
+- 已婚子女递归展开为子 `FamilyBox`
+- `visitedMainPeople` 防止一个 person 被多棵子树都当作主节点
+- `visitedUnions` 防止同一婚配单元被两棵来源家庭重复展开
+- 配偶来源家庭通过 `originOf` 标记，后续 Step 6 再做嵌入
+
+已扩展 `src/layout/boxModel.ts`：
+
+- 新增 `createCoupleBox(partnerIds, generation, originOf)`
+- 新增 `createFamilyBox(top, children)`
+
+已更新 `src/layout/coordinateSolver.ts`：
+
+- 坐标分配器改为消费 `buildForest(graph)` 的盒子森林
+- 当前只为盒子分配临时 `cx`，并按森林遍历顺序补齐 `birthOrder`
+- 仍不把盒子 `cx` 写入 `Person`
+
+### STEP 20 - Phase 1/2 宽度计算与锚点放置
+
+本步骤落实 coordinateSolver 中的 Phase 1 和 Phase 2。
+
+#### Step 3 - Phase 1 postorder 最小宽度
+
+已更新 `src/layout/coordinateSolver.ts`：
+
+- 新增 `measureBox(box)`
+- `PersonBox.width = SLOT`
+- `CoupleBox.width = SLOT + MARRIAGE_GAP + SLOT`
+- `FamilyBox` 先递归测量子盒，再计算：
+  - `childrenW = sum(child.width) + sibling gaps`
+  - `topW = width(top)`
+  - `box.width = max(childrenW, topW)`
+- 在 `box._childrenW` 与 `box._topW` 缓存计算结果，供 Phase 2 使用
+
+该实现让“已婚子女的小家庭占位优先于同胞等距”自然发生：子家庭 width 变大后，同胞间距会被父级 childrenW 自动撑开。
+
+#### Step 4 - Phase 2 preorder 分配 x 与血缘锚点对齐
+
+已新增 `placeBox(box, centerX)`：
+
+- 根盒从左到右放置
+- `PersonBox` / `CoupleBox` 只设置自身 `cx`
+- `FamilyBox` 先按 `box._childrenW` 摆放所有子盒
+- 独生子女时，父母盒 `dropX` 对齐该子女本人锚点
+- 多子女时，父母盒 `dropX` 对齐首末子女锚点中点
+- 新增 `assertFamilyAnchors`，误差超过 0.5 时抛错
+
+已更新 `src/layout/boxModel.ts`：
+
+- `anchorX(id)` 与 `dropX()` 现在返回绝对 x，而不是相对 offset
+- `Box` 增加 `_childrenW` 与 `_topW` 缓存字段
+
+当前坐标仍保持在盒子层，尚未写入 `Person`，等待后续渲染/布局结果结构接入。
+
+### STEP 21 - L1 同代重叠平移与配偶来源家庭嵌入
+
+本步骤落实降级阶梯中的 L1 重叠平移和配偶来源家庭嵌入。
+
+#### Step 5 - Phase 4(L1) 同代重叠检测 + 平移
+
+已更新 `src/layout/coordinateSolver.ts`：
+
+- 新增 `shiftSubtree(box, dx)`：递归平移 `box`、`top` 和所有 `children`
+- 新增 `resolveGenerationOverlaps(roots)`
+- 按 generation 收集当前可见盒：顶层 family / 展开的 sub-family / person leaf
+- 同代盒按 left 边界排序
+- 若相邻盒 `previous.right + MIN_GAP > current.left`，整体右推 current 子树
+
+该处理只做刚体平移，不修改盒子内部锚点。
+
+#### Step 6 - Phase 3 配偶来源家庭嵌入
+
+已新增 `embedOriginFamilies(roots)`：
+
+- 扫描带 `originOf` 的 CoupleBox
+- 查找 `originOf` 对应个体所在的另一棵血缘 root
+- 用 CoupleBox 中该配偶的绝对 anchorX 作为目标
+- 将来源 root 整体平移到该 anchor
+- 不合并任何同胞线、下降线或 FamilyBox
+
+执行顺序为：先做 L1 同代重叠平移，再做配偶来源家庭嵌入。嵌入后若来源家庭与核心同胞组再次冲突，留给后续 Step 7 处理，避免 L1 把刚贴合的来源锚点推开。
+
+已修正 `createCoupleBox`：
+
+- 左右配偶锚点改为 `cx ± (MARRIAGE_GAP / 2 + SLOT / 2)`
+- `dropX` 仍为婚配中点 `cx`
+
+本步骤的红线是：配偶来源家庭只做位置贴合，不和核心家庭同胞线合并。
+
+### STEP 22 - L2/L3 降级阶梯与坐标写回断言
+
+本步骤落实降级阶梯 L2/L3，以及布局结果写回和硬约束断言。
+
+#### Step 7 - L2/L3
+
+已更新 `src/layout/crossingReducer.ts`：
+
+- 在 Union 层增加轻量 barycenter 排序
+- 同胞组内仍按 `birthOrder` 稳定排序，不交换同胞硬顺序
+
+已更新 `src/layout/coordinateSolver.ts`：
+
+- 新增 `shiftSubtreeY(box, generationDelta)`，整棵盒子树下移 generation
+- 新增 `resolveOriginConflicts(roots)`
+- 来源家庭嵌入后，如果来源 root 与核心 FamilyBox 同代区间穿插，则下移核心 FamilyBox
+- 如果来源 root 与核心 root 中任意同代 FamilyBox 仍穿插，则下移核心侧发生冲突的 FamilyBox
+- 下移后重跑 L1 同代平移，并重新执行来源家庭锚点贴合
+
+该实现将 L3 表达为“核心小家庭整体下移”，不改变 dropX 与子女锚点关系。
+
+#### Step 8 - 写回坐标 + 硬约束断言
+
+已更新 `src/model/person.ts`：
+
+- 增加可选 `x`
+- 增加可选 `y`
+
+已更新 `src/layout/coordinateSolver.ts`：
+
+- 新增 `writeBackCoordinates(graph, roots)`
+- 新增 `normalizeGraphToOrigin(graph)`
+- 写回时同步 `person.x`、`person.y` 与最终 `person.generation`
+
+已更新 `src/rules/validation.ts`：
+
+- 新增 `assertLayoutInvariants(graph, roots)`
+- 断言 family dropX 与独生/多子女锚点一致
+- 断言同一 child 不出现在多条 sibling line
+- 断言同代 FamilyBox 区间不小于 `MIN_GAP`
+- 断言 CoupleBox 婚配线两端锚点有效
+
+当前断言在布局阶段抛错，用于防止渲染层掩盖布局错误。
+
+### STEP 23 - 架构通电与布局问题修复
+
+本步骤根据代码审查结果修复当前 graph engine 中“不能编译、不能运行、锚点自洽但错误”等问题。
+
+#### 构建与测试通电
+
+已新增：
+
+- `package.json`
+- `package-lock.json`
+- `tsconfig.json`
+- `tests/assignCoordinates.test.ts`
+
+新增 npm 脚本：
+
+- `npm run typecheck`
+- `npm test`
+
+当前测试覆盖：
+
+- 双亲 3 子女，老二已婚带 2 孩：确认小家庭占位撑开同胞间距，SVG 使用真实坐标。
+- 已婚子女 union partners 顺序反转：确认父母下降锚点锚到血缘子女本人，而不是姻亲配偶。
+
+#### 核心逻辑修复
+
+已修复：
+
+- `Box` 新增 `mainPersonId`，血缘锚点以主节点为准。
+- `buildForest` 使用稳定 root/union 排序，减少 Map 遍历顺序导致的不确定性。
+- `createCoupleBox` 接收 `mainPersonId` 和 `originOf`。
+- `primaryAnchorX` 与布局断言改用 `mainPersonId`。
+- `embedOriginFamilies` / `resolveGenerationOverlaps` / `resolveOriginConflicts` 改为参与 fixpoint 收敛。
+- 同代重叠检测覆盖 `family`、`person` 等可见盒，不再只看 family。
+- `UnionNode.partners` 放宽为 `[string] | [string, string]`，支持单亲 Union。
+- CoupleBox 间距改为更紧凑的 `MARRIAGE_GAP` 中心距，宽度统一为 `MARRIAGE_GAP + SLOT`。
+- 删除 `assignCoordinates` 末尾按 BFS 回填 `birthOrder` 的旧桩逻辑，避免污染真实出生顺序。
+- `svgRenderer` 改为消费 `person.x/y`，不再把所有节点画在 `0,0`。
+
+#### 验证结果
+
+已执行：
+
+```text
+npm run typecheck
+npm test
+```
+
+两项均通过。
 
 ### STEP 14 - Core Engine 统一入口
 

@@ -8,4 +8,6 @@ export interface Person {
 
   generation?: number;
   birthOrder?: number;
+  x?: number;
+  y?: number;
 }

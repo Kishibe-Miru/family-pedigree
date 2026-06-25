@@ -54,6 +54,7 @@ const state = {
   storageFailed: false,
   genMap: new Map(),
   numberMap: new Map(),
+  layoutResult: null,
   layoutFamilyUnits: []
 };
 
@@ -726,7 +727,59 @@ function autoLayout() {
   const gen = computeGenerations();
   state.genMap = gen;
   syncFamilyUnits();
-  computeNumbering(gen);
+  const engineGen = applyEngineLayout();
+  if (engineGen) state.genMap = engineGen;
+  computeNumbering(state.genMap);
+}
+
+function sexToEngine(sex) {
+  if (sex === "male") return "M";
+  if (sex === "female") return "F";
+  return "U";
+}
+
+function applyEngineLayout() {
+  const engine = window.PedigreeEngine;
+  if (!engine || typeof engine.layout !== "function") { state.layoutResult = null; return null; }
+
+  ensureDomainArrays();
+  const childrenByUnion = new Map();
+  state.project.parentages.forEach((parentage) => {
+    if (!parentage.unionId || !getUnion(parentage.unionId)) return;
+    if (!childrenByUnion.has(parentage.unionId)) childrenByUnion.set(parentage.unionId, []);
+    childrenByUnion.get(parentage.unionId).push(parentage.childId);
+  });
+
+  const positions = engine.layout({
+    persons: state.project.people.map((person) => ({
+      id: person.id,
+      sex: sexToEngine(person.sex),
+      birthOrder: Number.isFinite(person.order) ? person.order : undefined,
+      twinGroup: person.twinGroup || undefined,
+      twinType: person.twinType || undefined
+    })),
+    unions: state.project.unions.map((union) => ({
+      id: union.id,
+      partners: [...union.partnerIds],
+      consanguineous: union.partnerIds.length === 2 ? areConsanguineous(union.partnerIds[0], union.partnerIds[1]) : false
+    })),
+    childrenMap: [...childrenByUnion.entries()]
+  });
+
+  if (!positions || !Array.isArray(positions.nodes)) { state.layoutResult = null; return null; }
+  state.layoutResult = positions;
+
+  const engineGen = new Map();
+  positions.nodes.forEach((position) => {
+    const person = getPerson(position.id);
+    if (!person) return;
+    engineGen.set(position.id, position.generation);
+    if (person.manual) return;
+    if (Number.isFinite(position.x)) person.x = position.x;
+    if (Number.isFinite(position.y)) person.y = position.y;
+  });
+
+  return engineGen;
 }
 
 function normalizeToOrigin() {
@@ -742,11 +795,61 @@ function computeNumbering(gen) {
     rows.get(g).push(p);
   });
   [...rows.keys()].sort((a, b) => a - b).forEach((g, gi) => {
-    rows.get(g).sort((a, b) => a.x - b.x || a.order - b.order).forEach((p, pi) => {
+    rows.get(g).sort((a, b) => numberingRank(a, b, g)).forEach((p, pi) => {
       map.set(p.id, `${roman(gi + 1)}-${pi + 1}`);
     });
   });
   state.numberMap = map;
+}
+
+function numberingRank(a, b, generation) {
+  const rank = generationNumberingRank(generation);
+  const ar = rank.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+  const br = rank.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+  return ar - br || a.order - b.order || a.x - b.x;
+}
+
+function generationNumberingRank(generation) {
+  const rank = new Map();
+  let next = 0;
+  const append = (id) => {
+    const p = getPerson(id);
+    if (!p || (state.genMap.get(id) ?? 0) !== generation || rank.has(id)) return;
+    rank.set(id, next++);
+  };
+
+  const childGroups = new Map();
+  state.project.parentages.forEach((parentage) => {
+    const union = getUnion(parentage.unionId);
+    if (!union) return;
+    if (!childGroups.has(union.id)) childGroups.set(union.id, []);
+    childGroups.get(union.id).push(parentage.childId);
+  });
+
+  [...childGroups.entries()]
+    .sort((a, b) => familyOrder(a[0]) - familyOrder(b[0]) || a[0].localeCompare(b[0]))
+    .forEach(([, childIds]) => {
+      childIds
+        .map((id) => getPerson(id))
+        .filter(Boolean)
+        .sort((a, b) => a.order - b.order)
+        .forEach((child) => {
+          append(child.id);
+          findPartners(child.id).sort((a, b) => a.order - b.order).forEach((partner) => append(partner.id));
+        });
+    });
+
+  state.project.people
+    .filter((p) => (state.genMap.get(p.id) ?? 0) === generation)
+    .sort((a, b) => a.order - b.order)
+    .forEach((p) => append(p.id));
+  return rank;
+}
+
+function familyOrder(unionId) {
+  const union = getUnion(unionId);
+  if (!union) return Number.MAX_SAFE_INTEGER;
+  return Math.min(...union.partnerIds.map((id) => getPerson(id)?.order ?? Number.MAX_SAFE_INTEGER));
 }
 
 function roman(n) {
@@ -775,27 +878,17 @@ function refresh(doAutosave = true) {
 }
 
 function renderSvg() {
-  const svg = els.pedigreeSvg;
-  svg.innerHTML = "";
-  const rect = els.canvasWrap.getBoundingClientRect();
-  const W = Math.max(rect.width, 600), H = Math.max(rect.height, 400);
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.appendChild(buildDefs());
+  window.PedigreeUI.renderSvg(canvasContext());
+}
 
-  const root = svgEl("g", { transform: `translate(${state.offsetX},${state.offsetY}) scale(${state.scale})` });
-  svg.appendChild(root);
-
-  if (state.project.people.length === 0) {
-    root.appendChild(svgEl("text", { x: W / 2, y: H / 2, class: "empty-canvas-text" }, "点击左侧「添加先证者」开始绘制"));
-    return;
-  }
-
-  const s = state.project.settings;
-  drawGenerationLabels(root);
-  drawRelationships(root);
-  state.project.people.forEach((p) => drawPerson(root, p));
-  if (s.showTitle) drawTitle(root);
-  if (s.showLegend) drawLegend(root);
+function canvasContext() {
+  return {
+    state,
+    els,
+    buildDefs,
+    exportStyles,
+    roman
+  };
 }
 
 function buildDefs() {
@@ -814,216 +907,6 @@ function buildDefs() {
   return defs;
 }
 
-function drawGenerationLabels(root) {
-  const gen = state.genMap;
-  const rows = new Map();
-  state.project.people.forEach((p) => {
-    const g = gen.get(p.id) ?? 0;
-    if (!rows.has(g)) rows.set(g, []);
-    rows.get(g).push(p);
-  });
-  const minX = Math.min(...state.project.people.map((p) => p.x));
-  [...rows.keys()].sort((a, b) => a - b).forEach((g, gi) => {
-    const y = avg(rows.get(g).map((p) => p.y));
-    root.appendChild(svgEl("text", { x: minX - 70, y, class: "generation-label" }, roman(gi + 1)));
-  });
-}
-
-function drawRelationships(root) {
-  const units = collectFamilyUnits();
-  const marriageNodes = computeMarriageNodes();
-
-  // 配偶线：每段婚配关系都先落到一个不可见 marriage node；近亲婚配画双线。
-  partnerUnions().forEach((union) => {
-    const [aId, bId] = union.partnerIds;
-    const a = getPerson(aId), b = getPerson(bId);
-    if (!a || !b) return;
-    const route = marriageNodes.get(coupleKey([a.id, b.id]));
-    const consang = areConsanguineous(a.id, b.id);
-    if (route && route.kind === "line") {
-      root.appendChild(svgEl("line", { x1: route.left.x, y1: route.left.y, x2: route.right.x, y2: route.right.y, class: "marriage-line" }));
-      if (consang) root.appendChild(svgEl("line", { x1: route.left.x, y1: route.left.y + 3, x2: route.right.x, y2: route.right.y + 3, class: "marriage-line" }));
-    } else if (route && route.kind === "path") {
-      root.appendChild(svgEl("path", { d: route.d, class: "marriage-line" }));
-      if (consang) root.appendChild(svgEl("path", { d: route.d2, class: "marriage-line" }));
-    } else {
-      const [l, rt] = a.x <= b.x ? [a, b] : [b, a];
-      const mx = (l.x + rt.x) / 2;
-      root.appendChild(svgEl("path", { d: `M ${l.x + R} ${l.y} H ${mx} V ${rt.y} H ${rt.x - R}`, class: "marriage-line" }));
-      if (consang) root.appendChild(svgEl("path", { d: `M ${l.x + R} ${l.y + 3} H ${mx + 3} V ${rt.y} H ${rt.x - R}`, class: "marriage-line" }));
-    }
-  });
-
-  /* 家庭单元连线（双亲与单亲统一处理）：
-     - 同胞横线的范围强制覆盖下降点 dropX，无论子女如何错位，线都保持连通；
-     - 独生子女偏离下降点时，同样补一段水平线连到下降竖线；
-     - 同一子代行内，水平范围重叠的不同家庭横线自动错开高度，避免混成一条。 */
-  const fams = units.map((u) => {
-    const pa = getPerson(u.parentIds[0]);
-    const pb = u.parentIds.length === 2 ? getPerson(u.parentIds[1]) : null;
-    if (!pa || (u.parentIds.length === 2 && !pb)) return null;
-    const marriageNode = pb ? marriageNodes.get(coupleKey([pa.id, pb.id])) : null;
-    const dropX = pb ? (marriageNode ? marriageNode.x : (pa.x + pb.x) / 2) : pa.x;
-    const dropTopY = pb ? (marriageNode ? marriageNode.y : (pa.y + pb.y) / 2) : pa.y + R;
-    const childTopY = Math.min(...u.children.map((c) => c.y)) - R;
-    const xs = u.children.map((c) => c.x);
-    const lo = Math.min(...xs), hi = Math.max(...xs);
-    return { u, marriageNode, dropX, dropTopY, childTopY, lo, hi, level: 0 };
-  }).filter(Boolean);
-
-  // 按子代行分组，行内做区间错层（贪心着色）
-  const rows = new Map();
-  fams.forEach((f) => {
-    const key = Math.round(f.childTopY / GENERATION_GAP);
-    if (!rows.has(key)) rows.set(key, []);
-    rows.get(key).push(f);
-  });
-  const CLEAR = 14;       // 同高横线之间需保持的水平净距
-  const LEVEL_STEP = 10;  // 相邻错层的高度差
-  rows.forEach((arr) => {
-    arr.sort((a, b) => a.lo - b.lo || a.hi - b.hi);
-    const placed = [];
-    arr.forEach((f) => {
-      let lvl = 0;
-      while (placed.some((g) => g.level === lvl && f.lo < g.hi + CLEAR && g.lo < f.hi + CLEAR)) lvl++;
-      f.level = lvl;
-      placed.push(f);
-    });
-  });
-
-  fams.forEach((f) => {
-    const sibY = f.childTopY - SIBSHIP_DROP + R - f.level * LEVEL_STEP;
-    root.appendChild(svgEl("line", { x1: f.dropX, y1: f.dropTopY, x2: f.dropX, y2: sibY, class: "descent-line" }));
-    drawSiblingConnector(root, f, sibY, fams);
-    // 将子女按 twinGroup 分组：单胎从横线垂直下降；双胎从同一顶点斜线分叉
-    const singles = [], twinGroups = new Map();
-    f.u.children.forEach((c) => {
-      if (c.twinGroup) {
-        if (!twinGroups.has(c.twinGroup)) twinGroups.set(c.twinGroup, []);
-        twinGroups.get(c.twinGroup).push(c);
-      } else singles.push(c);
-    });
-    singles.forEach((c) => root.appendChild(svgEl("line", { x1: c.x, y1: sibY, x2: c.x, y2: c.y - R, class: "individual-line" })));
-    twinGroups.forEach((kids) => {
-      if (kids.length === 1) { const c = kids[0]; root.appendChild(svgEl("line", { x1: c.x, y1: sibY, x2: c.x, y2: c.y - R, class: "individual-line" })); return; }
-      const apexX = avg(kids.map((c) => c.x));
-      const apexY = sibY;
-      const forkY = sibY + SIBSHIP_DROP * 0.55;  // 斜线汇聚点
-      kids.forEach((c) => {
-        root.appendChild(svgEl("line", { x1: apexX, y1: apexY, x2: c.x, y2: forkY, class: "individual-line" }));
-        root.appendChild(svgEl("line", { x1: c.x, y1: forkY, x2: c.x, y2: c.y - R, class: "individual-line" }));
-      });
-      // 同卵双胎：两斜线之间加一条水平连接杆
-      if (kids[0].twinType === "identical") {
-        const xs = kids.map((c) => c.x).sort((a, b) => a - b);
-        const barY = (apexY + forkY) / 2;
-        const t = (barY - apexY) / (forkY - apexY);
-        const lx = apexX + (xs[0] - apexX) * t, rx = apexX + (xs[xs.length - 1] - apexX) * t;
-        root.appendChild(svgEl("line", { x1: lx, y1: barY, x2: rx, y2: barY, class: "twin-bar" }));
-      }
-    });
-  });
-}
-
-function drawSiblingConnector(root, f, sibY, fams = []) {
-  if (f.u.children.length === 1) {
-    const only = f.u.children[0];
-    if (Math.abs(only.x - f.dropX) > 0.5) {
-      const x1 = Math.min(f.dropX, only.x);
-      const x2 = Math.max(f.dropX, only.x);
-      root.appendChild(svgEl("line", { x1, y1: sibY, x2, y2: sibY, class: "sibling-line" }));
-    }
-    return;
-  }
-  drawSiblingLine(root, f, sibY, fams);
-}
-
-function drawSiblingLine(root, f, sibY, fams = []) {
-  if (f.hi - f.lo <= 0.5) return;
-  const childXs = f.u.children.map((c) => c.x).sort((a, b) => a - b);
-  const anchors = [...new Set([...childXs, f.dropX].map((x) => Math.round(x * 100) / 100))].sort((a, b) => a - b);
-  const baseSegments = (childXs.length < 6 || anchors.length < 3)
-    ? [[f.lo, f.hi]]
-    : anchors.slice(0, -1).map((x, i) => [x, anchors[i + 1]]);
-  const childIdSet = new Set(f.u.childIds);
-  const blockers = [];
-
-  state.project.people.forEach((p) => {
-    if (childIdSet.has(p.id)) return;
-    const lineTouchesSymbol = sibY >= p.y - R - 2 && sibY <= p.y + R + 2;
-    if (!lineTouchesSymbol) return;
-    if (p.x > f.lo && p.x < f.hi) blockers.push({ x: p.x, gap: R + 6 });
-  });
-  fams.forEach((other) => {
-    if (other === f) return;
-    const otherSibY = other.childTopY - SIBSHIP_DROP + R - other.level * 10;
-    const y1 = Math.min(other.dropTopY, otherSibY);
-    const y2 = Math.max(other.dropTopY, otherSibY);
-    if (sibY > y1 && sibY < y2 && other.dropX > f.lo && other.dropX < f.hi) {
-      blockers.push({ x: other.dropX, gap: 10 });
-    }
-  });
-
-  const segments = baseSegments.flatMap(([x1, x2]) => splitSegmentByBlockers(x1, x2, blockers));
-  segments.forEach(([x1, x2]) => {
-    if (x2 - x1 > 1) root.appendChild(svgEl("line", { x1, y1: sibY, x2, y2: sibY, class: "sibling-line" }));
-  });
-}
-
-function splitSegmentByBlockers(x1, x2, blockers) {
-  let segments = [[x1, x2]];
-  blockers.forEach((b) => {
-    const lo = b.x - b.gap, hi = b.x + b.gap;
-    segments = segments.flatMap(([a, c]) => {
-      if (hi <= a || lo >= c) return [[a, c]];
-      const out = [];
-      if (lo > a) out.push([a, lo]);
-      if (hi < c) out.push([hi, c]);
-      return out;
-    });
-  });
-  return segments;
-}
-
-function computeMarriageNodes() {
-  const routes = new Map();
-
-  partnerUnions().forEach((union) => {
-    const [aId, bId] = union.partnerIds;
-    const a = getPerson(aId), b = getPerson(bId);
-    if (!a || !b) return;
-    const [l, rt] = a.x <= b.x ? [a, b] : [b, a];
-    const key = coupleKey([a.id, b.id]);
-    const id = marriageNodeId([a.id, b.id]);
-    if (Math.abs(l.y - rt.y) < 1) {
-      const x1 = l.x + R, x2 = rt.x - R;
-      routes.set(key, {
-        id,
-        kind: "line",
-        x: (x1 + x2) / 2,
-        y: l.y,
-        left: { x: x1, y: l.y },
-        right: { x: x2, y: rt.y }
-      });
-    } else {
-      const mx = (l.x + rt.x) / 2;
-      const my = (l.y + rt.y) / 2;
-      routes.set(key, {
-        id,
-        kind: "path",
-        x: mx,
-        y: my,
-        left: { x: l.x + R, y: l.y },
-        right: { x: rt.x - R, y: rt.y },
-        d: `M ${l.x + R} ${l.y} H ${mx} V ${rt.y} H ${rt.x - R}`,
-        d2: `M ${l.x + R} ${l.y + 3} H ${mx + 3} V ${rt.y} H ${rt.x - R}`,
-      });
-    }
-  });
-
-  return routes;
-}
-
 // 是否近亲婚配：两人有共同祖先（向上 4 代内）
 function areConsanguineous(aId, bId) {
   if (!aId || !bId || aId === bId) return false;
@@ -1038,159 +921,8 @@ function areConsanguineous(aId, bId) {
   return false;
 }
 
-function drawPerson(root, p) {
-  const g = svgEl("g", { class: "node-hit", "data-id": p.id });
-  const s = state.project.settings;
-
-  // 先证者箭头（左下指向符号）
-  if (p.proband) {
-    const ax = p.x - R - 26, ay = p.y + R + 26;
-    g.appendChild(svgEl("line", { x1: ax, y1: ay, x2: p.x - R * 0.78, y2: p.y + R * 0.78, class: "proband-arrow", "marker-end": "url(#arrow)" }));
-    g.appendChild(svgEl("text", { x: ax - 4, y: ay + 12, class: "proband-label" }, "P"));
-  }
-
-  // 选中环
-  if (state.selectedId === p.id) {
-    g.appendChild(svgEl("rect", { x: p.x - R - 8, y: p.y - R - 8, width: NODE_SIZE + 16, height: NODE_SIZE + 16, rx: 8, class: "selected-ring" }));
-  }
-
-  const cls = `person-symbol ${p.affectedStatus || "unaffected"}`;
-  if (p.sex === "female") {
-    g.appendChild(svgEl("circle", { cx: p.x, cy: p.y, r: R, class: cls }));
-  } else if (p.sex === "male") {
-    g.appendChild(svgEl("rect", { x: p.x - R, y: p.y - R, width: NODE_SIZE, height: NODE_SIZE, class: cls }));
-  } else {
-    g.appendChild(svgEl("polygon", { points: `${p.x},${p.y - R} ${p.x + R},${p.y} ${p.x},${p.y + R} ${p.x - R},${p.y}`, class: cls }));
-  }
-
-  if (p.deceased) {
-    g.appendChild(svgEl("line", { x1: p.x - R * 1.25, y1: p.y + R * 1.25, x2: p.x + R * 1.25, y2: p.y - R * 1.25, class: "deceased-line" }));
-  }
-
-  // 世代编号（符号左上角，避开顶部下降竖线）
-  if (s.showNumber) {
-    g.appendChild(svgEl("text", { x: p.x - R - 5, y: p.y - R + 2, class: "id-label" }, state.numberMap.get(p.id) || ""));
-  }
-
-  // 名称 / 年龄 / 诊断（符号下方依次堆叠）
-  let ty = p.y + LABEL_OFFSET;
-  if (s.showName && p.name) { g.appendChild(svgEl("text", { x: p.x, y: ty, class: "person-label" }, p.name)); ty += 15; }
-  if (s.showAge) {
-    const meta = [p.age && `${p.age}岁`, p.birthYear && `b.${p.birthYear}`].filter(Boolean).join(" ");
-    if (meta) { g.appendChild(svgEl("text", { x: p.x, y: ty, class: "meta-label" }, meta)); ty += 14; }
-  }
-  if (s.showDiagnosis && p.diagnoses.length) {
-    p.diagnoses.slice(0, 3).forEach((d) => { g.appendChild(svgEl("text", { x: p.x, y: ty, class: "diagnosis-label" }, d)); ty += 14; });
-  }
-
-  root.appendChild(g);
-}
-
-function drawTitle(root) {
-  const b = contentBounds();
-  root.appendChild(svgEl("text", { x: (b.minX + b.maxX) / 2, y: b.minY - 56, class: "title-text" }, state.project.title || "家族谱系图"));
-}
-
-function drawLegend(root) {
-  const b = contentBounds();
-  const x = b.maxX + 56;
-  const y = b.minY;
-  const rowH = 30;
-  const items = [
-    { kind: "rect", fill: "#fff", text: "男性 · 未患病" },
-    { kind: "circle", fill: "#fff", text: "女性 · 未患病" },
-    { kind: "diamond", fill: "#e2e8ec", text: "性别未知" },
-    { kind: "rect", fill: "#2f3a42", text: "患病" },
-    { kind: "rect", fill: "url(#suspectedPattern)", text: "疑似" },
-    { kind: "carrier", text: "携带者（纹理）" },
-    { kind: "deceased", text: "已故（／）" },
-    { kind: "proband", text: "先证者（箭头 P）" },
-    { kind: "twin", text: "双胞胎（同卵带横杆）" },
-    { kind: "consang", text: "近亲婚配（双线）" }
-  ];
-  const boxW = 188, boxH = items.length * rowH + 36;
-  const g = svgEl("g");
-  g.appendChild(svgEl("rect", { x, y, width: boxW, height: boxH, rx: 8, class: "legend-box" }));
-  g.appendChild(svgEl("text", { x: x + 14, y: y + 24, class: "legend-title" }, "图例"));
-  items.forEach((it, i) => {
-    const cy = y + 48 + i * rowH;
-    const sx = x + 24;
-    const r = 9;
-    if (it.kind === "rect") g.appendChild(svgEl("rect", { x: sx - r, y: cy - r, width: r * 2, height: r * 2, fill: it.fill, stroke: "#2f3a42", "stroke-width": 2 }));
-    else if (it.kind === "circle") g.appendChild(svgEl("circle", { cx: sx, cy, r, fill: it.fill, stroke: "#2f3a42", "stroke-width": 2 }));
-    else if (it.kind === "diamond") g.appendChild(svgEl("polygon", { points: `${sx},${cy - r} ${sx + r},${cy} ${sx},${cy + r} ${sx - r},${cy}`, fill: it.fill, stroke: "#2f3a42", "stroke-width": 2 }));
-    else if (it.kind === "deceased") {
-      g.appendChild(svgEl("rect", { x: sx - r, y: cy - r, width: r * 2, height: r * 2, fill: "#fff", stroke: "#2f3a42", "stroke-width": 2 }));
-      g.appendChild(svgEl("line", { x1: sx - r - 3, y1: cy + r + 3, x2: sx + r + 3, y2: cy - r - 3, stroke: "#2f3a42", "stroke-width": 2 }));
-    } else if (it.kind === "proband") {
-      g.appendChild(svgEl("rect", { x: sx - r, y: cy - r, width: r * 2, height: r * 2, fill: "#fff", stroke: "#2f3a42", "stroke-width": 2 }));
-      g.appendChild(svgEl("line", { x1: sx - r - 12, y1: cy + r + 8, x2: sx - r + 1, y2: cy + r - 1, stroke: "#2f3a42", "stroke-width": 2, "marker-end": "url(#arrow)" }));
-    } else if (it.kind === "carrier") {
-      g.appendChild(svgEl("circle", { cx: sx, cy, r, fill: "url(#carrierPattern)", stroke: "#2f3a42", "stroke-width": 2 }));
-    } else if (it.kind === "twin") {
-      g.appendChild(svgEl("line", { x1: sx, y1: cy - r, x2: sx - r, y2: cy + r, stroke: "#2f3a42", "stroke-width": 2 }));
-      g.appendChild(svgEl("line", { x1: sx, y1: cy - r, x2: sx + r, y2: cy + r, stroke: "#2f3a42", "stroke-width": 2 }));
-      g.appendChild(svgEl("line", { x1: sx - r * 0.5, y1: cy, x2: sx + r * 0.5, y2: cy, stroke: "#2f3a42", "stroke-width": 2 }));
-    } else if (it.kind === "consang") {
-      g.appendChild(svgEl("line", { x1: sx - r, y1: cy - 2, x2: sx + r, y2: cy - 2, stroke: "#2f3a42", "stroke-width": 2 }));
-      g.appendChild(svgEl("line", { x1: sx - r, y1: cy + 2, x2: sx + r, y2: cy + 2, stroke: "#2f3a42", "stroke-width": 2 }));
-    }
-    g.appendChild(svgEl("text", { x: x + 44, y: cy, class: "legend-text" }, it.text));
-  });
-  root.appendChild(g);
-}
-
 function contentBounds() {
-  const people = state.project.people;
-  if (people.length === 0) return { minX: 0, minY: 0, maxX: 600, maxY: 400, width: 600, height: 400 };
-  const minXs = [], maxXs = [], minYs = [], maxYs = [];
-  people.forEach((p) => {
-    const labelWidth = estimatePersonTextWidth(p);
-    minXs.push(p.x - Math.max(R, labelWidth / 2));
-    maxXs.push(p.x + Math.max(R, labelWidth / 2));
-    minYs.push(p.y - R - 34);
-    maxYs.push(p.y + R + estimatePersonTextHeight(p));
-  });
-  if (state.project.settings.showTitle) {
-    const centerX = avg(people.map((p) => p.x));
-    const titleW = textWidth(state.project.title || "家族谱系图", 20, 1.1);
-    minXs.push(centerX - titleW / 2);
-    maxXs.push(centerX + titleW / 2);
-    minYs.push(Math.min(...people.map((p) => p.y)) - 135);
-  }
-  if (state.project.settings.showLegend) {
-    const maxX = Math.max(...people.map((p) => p.x));
-    minXs.push(maxX + 75);
-    maxXs.push(maxX + 75 + 225);
-  }
-  const minX = Math.min(...minXs), maxX = Math.max(...maxXs);
-  const minY = Math.min(...minYs), maxY = Math.max(...maxYs);
-  return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
-}
-
-function estimatePersonTextWidth(p) {
-  const widths = [];
-  const s = state.project.settings;
-  if (s.showName && p.name) widths.push(textWidth(p.name, 13));
-  if (s.showDiagnosis && p.diagnoses && p.diagnoses.length) widths.push(textWidth(p.diagnoses.slice(0, 3).join("、"), 11));
-  if (s.showAge) {
-    const meta = [p.age ? `${p.age}岁` : "", p.birthYear ? `${p.birthYear}年` : ""].filter(Boolean).join(" / ");
-    if (meta) widths.push(textWidth(meta, 11));
-  }
-  return Math.max(NODE_SIZE, ...widths);
-}
-
-function estimatePersonTextHeight(p) {
-  const s = state.project.settings;
-  let h = 16;
-  if (s.showName && p.name) h += 18;
-  if (s.showDiagnosis && p.diagnoses && p.diagnoses.length) h += 16;
-  if (s.showAge && (p.age || p.birthYear)) h += 14;
-  return h;
-}
-
-function textWidth(text, fontSize, factor = 0.62) {
-  return String(text || "").length * fontSize * factor;
+  return window.PedigreeUI.contentBounds(canvasContext());
 }
 
 /* ============================================================
@@ -1387,8 +1119,7 @@ function zoomBy(delta) {
 function fitView() {
   if (state.project.people.length === 0) { state.scale = 1; state.offsetX = 0; state.offsetY = 0; renderSvg(); updateButtons(); return; }
   const b = contentBounds();
-  const s = state.project.settings;
-  const padL = 110, padR = s.showLegend ? 280 : 110, padT = s.showTitle ? 110 : 90, padB = 110;
+  const padL = 110, padR = 110, padT = 90, padB = 110;
   const rect = els.canvasWrap.getBoundingClientRect();
   const cw = rect.width || 800, ch = rect.height || 600;
   const worldW = b.width + padL + padR;
@@ -1399,8 +1130,8 @@ function fitView() {
   // 简化：直接居中内容包围盒中心
   const centerX = (b.minX + b.maxX) / 2;
   const centerY = (b.minY + b.maxY) / 2;
-  state.offsetX = cw / 2 - centerX * scale + (s.showLegend ? -70 * scale : 0);
-  state.offsetY = ch / 2 - centerY * scale + (s.showTitle ? 18 * scale : 0);
+  state.offsetX = cw / 2 - centerX * scale;
+  state.offsetY = ch / 2 - centerY * scale;
   renderSvg();
   updateButtons();
 }
@@ -1632,39 +1363,7 @@ function validateProjectData(proj) {
    导出 PNG / SVG
    ============================================================ */
 function buildExportSvg() {
-  const b = contentBounds();
-  const s = state.project.settings;
-  const padL = 90, padT = s.showTitle ? 100 : 70, padB = 90;
-  const padR = s.showLegend ? 280 : 90;
-  const vbX = b.minX - padL;
-  const vbY = b.minY - padT;
-  const W = b.width + padL + padR;
-  const Hh = b.height + padT + padB;
-
-  const svg = svgEl("svg", {
-    xmlns: SVG_NS, width: W, height: Hh, viewBox: `${vbX} ${vbY} ${W} ${Hh}`
-  });
-  svg.appendChild(svgEl("rect", { x: vbX, y: vbY, width: W, height: Hh, fill: "#ffffff" }));
-  svg.appendChild(buildDefs());
-  const style = svgEl("style");
-  style.textContent = exportStyles();
-  svg.appendChild(style);
-  const g = svgEl("g");
-  svg.appendChild(g);
-  drawGenerationLabels(g);
-  drawRelationships(g);
-  state.project.people.forEach((p) => drawPersonStatic(g, p));
-  if (s.showTitle) drawTitle(g);
-  if (s.showLegend) drawLegend(g);
-  return { svg, W, H: Hh };
-}
-
-function drawPersonStatic(root, p) {
-  // 与 drawPerson 相同，但不含选中环
-  const saved = state.selectedId;
-  state.selectedId = null;
-  drawPerson(root, p);
-  state.selectedId = saved;
+  return window.PedigreeUI.buildExportSvg(canvasContext());
 }
 
 function exportStyles() {
