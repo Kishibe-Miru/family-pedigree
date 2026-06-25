@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { layout } from "../src/browser/entry";
+import { LayoutInput } from "../src/model/layoutResult";
 
 test("browser layout entry centers a proband under both parents", () => {
-  const result = layout({
+  const response = layout({
     persons: [
       { id: "father", sex: "M" },
       { id: "mother", sex: "F" },
@@ -17,7 +18,8 @@ test("browser layout entry centers a proband under both parents", () => {
     ]
   });
 
-  assert.ok(result);
+  assert.ok(response.ok);
+  const result = response.layout;
   const byId = new Map(result.nodes.map((position) => [position.id, position]));
   const father = byId.get("father")!;
   const mother = byId.get("mother")!;
@@ -33,3 +35,62 @@ test("browser layout entry centers a proband under both parents", () => {
   assert.ok(result.bounds.width > 0);
   assert.deepEqual(result.generationLabels.map((label) => label.label), ["I", "II"]);
 });
+
+test("browser layout entry rejects duplicate childrenMap union entries before Map conversion", () => {
+  const response = layout({
+    ...validInput(),
+    childrenMap: [
+      ["u0", ["proband"]],
+      ["u0", ["other"]]
+    ]
+  });
+
+  assert.equal(response.ok, false);
+  if (response.ok) throw new Error("expected duplicate childrenMap union entry to fail");
+  assert.equal(response.error.code, "LAYOUT_INPUT_CHILDREN_MAP_UNION_DUPLICATE");
+  assert.match(response.error.message, /duplicate union entry u0/);
+});
+
+test("browser layout entry rejects duplicate child ids inside one childrenMap entry", () => {
+  const response = layout({
+    ...validInput(),
+    childrenMap: [
+      ["u0", ["proband", "proband"]]
+    ]
+  });
+
+  assert.equal(response.ok, false);
+  if (response.ok) throw new Error("expected duplicate child id to fail");
+  assert.equal(response.error.code, "LAYOUT_INPUT_CHILDREN_MAP_CHILD_DUPLICATE");
+  assert.match(response.error.message, /duplicate child id proband/);
+});
+
+test("browser layout entry rejects empty partner ids before graph validation", () => {
+  const response = layout({
+    ...validInput(),
+    unions: [
+      { id: "u0", partners: ["father", ""] }
+    ]
+  });
+
+  assert.equal(response.ok, false);
+  if (response.ok) throw new Error("expected empty partner id to fail");
+  assert.equal(response.error.code, "LAYOUT_INPUT_UNION_PARTNER_EMPTY");
+});
+
+function validInput(): LayoutInput {
+  return {
+    persons: [
+      { id: "father", sex: "M" },
+      { id: "mother", sex: "F" },
+      { id: "proband", sex: "U", birthOrder: 0 },
+      { id: "other", sex: "U", birthOrder: 1 }
+    ],
+    unions: [
+      { id: "u0", partners: ["father", "mother"] }
+    ],
+    childrenMap: [
+      ["u0", ["proband"]]
+    ]
+  };
+}

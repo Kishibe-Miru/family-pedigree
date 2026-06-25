@@ -330,8 +330,8 @@ function renderPeople(ctx) {
     const node = nodes.get(person.id);
     return {
       ...person,
-      x: Number.isFinite(person.x) ? person.x : node?.x ?? 0,
-      y: Number.isFinite(person.y) ? person.y : node?.y ?? 0,
+      x: Number.isFinite(node?.x) ? node.x : Number.isFinite(person.x) ? person.x : 0,
+      y: Number.isFinite(node?.y) ? node.y : Number.isFinite(person.y) ? person.y : 0,
       generation: node?.generation ?? ctx.state.genMap.get(person.id) ?? 0,
       diagnoses: Array.isArray(person.diagnoses) ? person.diagnoses : []
     };

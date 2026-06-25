@@ -242,6 +242,17 @@ function primaryAnchorX(box: Box): number {
   return anchorMember ? box.anchorX(anchorMember) : box.cx;
 }
 
+function siblingAnchorGap(previous: Box, current: Box): number {
+  if (!requiresSiblingFamilySpace(previous) && !requiresSiblingFamilySpace(current)) return PERSON_GAP;
+  const previousRight = rightOf(previous) - primaryAnchorX(previous);
+  const currentLeft = primaryAnchorX(current) - leftOf(current);
+  return Math.max(PERSON_GAP, previousRight + MIN_GAP + currentLeft);
+}
+
+function requiresSiblingFamilySpace(box: Box): boolean {
+  return box.kind === "family" && (box.children?.length ?? 0) > 0;
+}
+
 function assertFamilyAnchors(box: Box, expectedDropX: number) {
   if (!box.top || !box.children || box.children.length === 0) return;
   const actualDropX = box.top.dropX();
@@ -711,9 +722,10 @@ function compactWideSiblingRows(roots: Box[], originLinks: OriginLink[]) {
       const previous = box.children[i - 1];
       const current = box.children[i];
       const gap = primaryAnchorX(current) - primaryAnchorX(previous);
-      if (gap <= 3 * PERSON_GAP) continue;
+      const desiredGap = siblingAnchorGap(previous, current);
+      if (gap <= desiredGap + 2 * PERSON_GAP) continue;
 
-      const dx = (gap - PERSON_GAP) / 2;
+      const dx = (gap - desiredGap) / 2;
       shiftSubtree(previous, dx);
       const currentMovers = [current];
       const originRoot = originByCoreFamily.get(current);
@@ -758,7 +770,7 @@ function compactSiblingRows(roots: Box[], originLinks: OriginLink[]) {
       const previous = box.children[i - 1];
       const current = box.children[i];
       const gap = primaryAnchorX(current) - primaryAnchorX(previous);
-      const excess = gap - PERSON_GAP;
+      const excess = gap - siblingAnchorGap(previous, current);
       if (excess <= 0.5) continue;
 
       const movers = [current];

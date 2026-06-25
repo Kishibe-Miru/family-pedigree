@@ -231,8 +231,7 @@ function findUnionByPartners(partnerIds) {
 
 function ensureUnion(partnerIds) {
   ensureDomainArrays();
-  const unique = [...new Set(partnerIds)].filter(Boolean);
-  const ids = unique.length === 2 ? orderCouple(unique[0], unique[1]) : unique;
+  const ids = normalizeParentIds(partnerIds);
   const existing = findUnionByPartners(ids);
   if (existing) return existing;
   const union = {
@@ -247,12 +246,11 @@ function ensureUnion(partnerIds) {
 
 function addParentage(parentIds, childId, unionId = "") {
   ensureDomainArrays();
-  const unique = [...new Set(parentIds)].filter(Boolean);
-  const ids = unique.length === 2 ? orderCouple(unique[0], unique[1]) : unique;
+  const ids = normalizeParentIds(parentIds);
   const union = unionId ? state.project.unions.find((u) => u.id === unionId) : ensureUnion(ids);
   const existing = state.project.parentages.find((pa) => pa.childId === childId && pa.unionId === union.id);
   if (existing) {
-    existing.parentIds = orderCouple(...[...new Set([...existing.parentIds, ...ids])]);
+    existing.parentIds = normalizeParentIds([...existing.parentIds, ...ids]);
     return existing;
   }
   const parentage = {
@@ -268,8 +266,7 @@ function addParentage(parentIds, childId, unionId = "") {
 
 function setBiologicalParentage(childId, parentIds) {
   ensureDomainArrays();
-  const unique = [...new Set(parentIds)].filter(Boolean);
-  const ordered = unique.length === 2 ? orderCouple(unique[0], unique[1]) : unique;
+  const ordered = normalizeParentIds(parentIds);
   const union = ensureUnion(ordered);
   state.project.parentages = state.project.parentages.filter((pa) => !(pa.childId === childId && pa.kind === "biological"));
   return addParentage(ordered, childId, union.id);
@@ -642,6 +639,11 @@ function orderCouple(aId, bId) {
   return a.order <= b.order ? [aId, bId] : [bId, aId];
 }
 
+function normalizeParentIds(ids) {
+  const unique = [...new Set(ids)].filter(Boolean);
+  return unique.length === 2 ? orderCouple(unique[0], unique[1]) : unique;
+}
+
 function coupleKey(ids) { return [...ids].sort().join("|"); }
 
 function familyUnitId(parentIds) {
@@ -743,6 +745,34 @@ function applyEngineLayout() {
   if (!engine || typeof engine.layout !== "function") { state.layoutResult = null; return null; }
 
   ensureDomainArrays();
+  const layoutInput = buildEngineLayoutInput();
+  const response = engine.layout(layoutInput);
+
+  if (response && response.ok === false) {
+    console.error("[PedigreeEngine] layout failed", response.error);
+    setStatus(`布局失败：${response.error?.message || "输入数据无效"}`);
+    state.layoutResult = null;
+    return null;
+  }
+
+  const positions = response?.ok === true ? response.layout : response;
+  if (!positions || !Array.isArray(positions.nodes)) { state.layoutResult = null; return null; }
+
+  const engineGen = new Map();
+  positions.nodes.forEach((position) => {
+    const person = getPerson(position.id);
+    if (!person) return;
+    engineGen.set(position.id, position.generation);
+    if (person.manual) return;
+    if (Number.isFinite(position.x)) person.x = position.x;
+    if (Number.isFinite(position.y)) person.y = position.y;
+  });
+
+  state.layoutResult = finalizeLayoutResultFromCurrentPeople(positions, layoutInput);
+  return engineGen;
+}
+
+function buildEngineLayoutInput() {
   const childrenByUnion = new Map();
   state.project.parentages.forEach((parentage) => {
     if (!parentage.unionId || !getUnion(parentage.unionId)) return;
@@ -750,7 +780,7 @@ function applyEngineLayout() {
     childrenByUnion.get(parentage.unionId).push(parentage.childId);
   });
 
-  const positions = engine.layout({
+  return {
     persons: state.project.people.map((person) => ({
       id: person.id,
       sex: sexToEngine(person.sex),
@@ -764,22 +794,35 @@ function applyEngineLayout() {
       consanguineous: union.partnerIds.length === 2 ? areConsanguineous(union.partnerIds[0], union.partnerIds[1]) : false
     })),
     childrenMap: [...childrenByUnion.entries()]
+  };
+}
+
+function finalizeLayoutResultFromCurrentPeople(layoutResult, layoutInput = buildEngineLayoutInput(), forcedManualIds = new Set()) {
+  const engine = window.PedigreeEngine;
+  if (!engine || typeof engine.applyManualNodePositionsToLayout !== "function") return layoutResult;
+  return engine.applyManualNodePositionsToLayout({
+    layout: layoutResult,
+    people: state.project.people.map((person) => ({
+      id: person.id,
+      x: person.x,
+      y: person.y,
+      manual: !!person.manual || forcedManualIds.has(person.id),
+      twinGroup: person.twinGroup || undefined,
+      twinType: person.twinType || undefined
+    })),
+    unions: layoutInput.unions,
+    childrenMap: layoutInput.childrenMap
   });
+}
 
-  if (!positions || !Array.isArray(positions.nodes)) { state.layoutResult = null; return null; }
-  state.layoutResult = positions;
-
-  const engineGen = new Map();
-  positions.nodes.forEach((position) => {
-    const person = getPerson(position.id);
-    if (!person) return;
-    engineGen.set(position.id, position.generation);
-    if (person.manual) return;
-    if (Number.isFinite(position.x)) person.x = position.x;
-    if (Number.isFinite(position.y)) person.y = position.y;
-  });
-
-  return engineGen;
+function refreshLayoutResultFromCurrentPeople(forcedManualIds = new Set()) {
+  if (!state.layoutResult) return;
+  try {
+    state.layoutResult = finalizeLayoutResultFromCurrentPeople(state.layoutResult, buildEngineLayoutInput(), forcedManualIds);
+  } catch (error) {
+    console.error("[PedigreeEngine] failed to refresh manual layout", error);
+    setStatus(`布局刷新失败：${error?.message || "输入数据无效"}`);
+  }
 }
 
 function normalizeToOrigin() {
@@ -1043,6 +1086,7 @@ function onPointerMove(evt) {
     p.x = pt.x - state.drag.dx;
     p.y = pt.y - state.drag.dy;
     state.drag.moved = true;
+    refreshLayoutResultFromCurrentPeople(new Set([p.id]));
     renderSvg();
   } else if (state.pan) {
     state.offsetX = state.pan.ox + (evt.clientX - state.pan.startX);
@@ -1065,6 +1109,7 @@ function onPointerUp() {
       const moved = getPerson(state.drag.id);
       if (moved) moved.manual = true;
       computeNumbering(computeGenerations());
+      refreshLayoutResultFromCurrentPeople();
       fitKeep();
     }
     const id = state.drag.id;

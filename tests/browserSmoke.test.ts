@@ -10,13 +10,22 @@ const ROOT = process.cwd();
 const TOOL_PATH = "/家族谱系图工具/index.html";
 const ARTIFACT_DIR = path.join(ROOT, "output", "playwright", "browser-smoke");
 
-test("browser smoke renders stable pedigree scenarios", async () => {
+test("browser smoke renders stable pedigree scenarios", async (t) => {
   mkdirSync(ARTIFACT_DIR, { recursive: true });
   const server = await startStaticServer(ROOT);
-  const browser = await chromium.launch();
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   const scenarioMetrics: ScenarioMetrics[] = [];
 
   try {
+    try {
+      browser = await chromium.launch();
+    } catch (error) {
+      if (isMissingChromium(error)) {
+        t.skip("Playwright Chromium is not installed. Run: npx playwright install chromium");
+        return;
+      }
+      throw error;
+    }
     const baseUrl = `http://127.0.0.1:${server.port}`;
 
     scenarioMetrics.push(await runScenario(browser, baseUrl, "01-empty", async () => {
@@ -43,7 +52,7 @@ test("browser smoke renders stable pedigree scenarios", async () => {
       await clickButton(page, "女儿 D");
     }));
   } finally {
-    await browser.close();
+    await browser?.close();
     await server.close();
   }
 
@@ -91,16 +100,19 @@ async function runScenario(
   });
   page.on("pageerror", (error) => consoleMessages.push(error.message));
 
-  await page.goto(`${baseUrl}${encodeURI(TOOL_PATH)}`);
-  await page.evaluate(() => localStorage.clear());
-  await page.reload();
-  await build(page);
-  await page.screenshot({ path: path.join(ARTIFACT_DIR, `${name}.png`), scale: "css" });
-  const metrics = await collectMetrics(page, name);
-  await page.close();
+  try {
+    await page.goto(`${baseUrl}${encodeURI(TOOL_PATH)}`);
+    await page.evaluate(() => localStorage.clear());
+    await page.reload();
+    await build(page);
+    await page.screenshot({ path: path.join(ARTIFACT_DIR, `${name}.png`), scale: "css" });
+    const metrics = await collectMetrics(page, name);
 
-  assert.deepEqual(consoleMessages, [], `${name} console errors`);
-  return metrics;
+    assert.deepEqual(consoleMessages, [], `${name} console errors`);
+    return metrics;
+  } finally {
+    await page.close();
+  }
 }
 
 async function clickButton(page: Page, name: string) {
@@ -223,6 +235,11 @@ function contentType(filePath: string) {
   if (ext === ".svg") return "image/svg+xml";
   if (ext === ".png") return "image/png";
   return "application/octet-stream";
+}
+
+function isMissingChromium(error: unknown) {
+  return error instanceof Error &&
+    /Executable doesn't exist|browser executable|playwright install/i.test(error.message);
 }
 
 interface StaticServer {

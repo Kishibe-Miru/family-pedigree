@@ -2,8 +2,196 @@ import { PedigreeGraph } from "../model/pedigreeGraph";
 import { GENERATION_GAP, NODE_SIZE } from "../layout/boxModel";
 import { OriginLink } from "../layout/familyForest";
 
-export function validateGraph(graph: PedigreeGraph) {
+export class GraphValidationError extends Error {
+  readonly code: string;
+  readonly details?: unknown;
+
+  constructor(code: string, message: string, details?: unknown) {
+    super(message);
+    this.name = "GraphValidationError";
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export function validateGraph(graph: PedigreeGraph): PedigreeGraph {
+  const personIds = validatePersonIds(graph);
+  validateUnions(graph, personIds);
+  validateChildrenMap(graph, personIds);
+  validateAcyclicParentage(graph);
+
   return graph;
+}
+
+function validatePersonIds(graph: PedigreeGraph): Set<string> {
+  const personIds = new Set<string>();
+  for (const [personId, person] of graph.persons.entries()) {
+    if (!personId) {
+      fail("GRAPH_PERSON_ID_EMPTY", "person id must be non-empty", { personId });
+    }
+    if (!person.id) {
+      fail("GRAPH_PERSON_ID_EMPTY", `person stored at ${personId} has an empty id`, { personId, person });
+    }
+    if (person.id !== personId) {
+      fail(
+        "GRAPH_PERSON_ID_MISMATCH",
+        `person map key ${personId} does not match person id ${person.id}`,
+        { personId, person }
+      );
+    }
+    if (personIds.has(person.id)) {
+      fail("GRAPH_PERSON_ID_DUPLICATE", `duplicate person id ${person.id}`, { personId: person.id });
+    }
+    personIds.add(person.id);
+  }
+  return personIds;
+}
+
+function validateUnions(graph: PedigreeGraph, personIds: Set<string>) {
+  const unionIds = new Set<string>();
+  for (const [unionId, union] of graph.unions.entries()) {
+    if (!unionId) {
+      fail("GRAPH_UNION_ID_EMPTY", "union id must be non-empty", { unionId });
+    }
+    if (!union.id) {
+      fail("GRAPH_UNION_ID_EMPTY", `union stored at ${unionId} has an empty id`, { unionId, union });
+    }
+    if (union.id !== unionId) {
+      fail(
+        "GRAPH_UNION_ID_MISMATCH",
+        `union map key ${unionId} does not match union id ${union.id}`,
+        { unionId, union }
+      );
+    }
+    if (unionIds.has(union.id)) {
+      fail("GRAPH_UNION_ID_DUPLICATE", `duplicate union id ${union.id}`, { unionId: union.id });
+    }
+    unionIds.add(union.id);
+
+    const partners: readonly string[] = union.partners;
+    if (partners.length !== 1 && partners.length !== 2) {
+      fail(
+        "GRAPH_UNION_PARTNER_COUNT",
+        `union ${union.id} must have 1 or 2 partners, got ${partners.length}`,
+        { unionId: union.id, partners }
+      );
+    }
+
+    const seenPartners = new Set<string>();
+    for (const partnerId of partners) {
+      if (!personIds.has(partnerId)) {
+        fail(
+          "GRAPH_UNION_PARTNER_MISSING",
+          `union ${union.id} references missing partner ${partnerId}`,
+          { unionId: union.id, partnerId }
+        );
+      }
+      if (seenPartners.has(partnerId)) {
+        fail(
+          "GRAPH_UNION_PARTNER_DUPLICATE",
+          `union ${union.id} lists partner ${partnerId} more than once`,
+          { unionId: union.id, partnerId }
+        );
+      }
+      seenPartners.add(partnerId);
+    }
+  }
+}
+
+function validateChildrenMap(graph: PedigreeGraph, personIds: Set<string>) {
+  const childParentUnion = new Map<string, string>();
+  for (const [unionId, childIds] of graph.childrenMap.entries()) {
+    if (!graph.unions.has(unionId)) {
+      fail(
+        "GRAPH_CHILDREN_UNION_MISSING",
+        `childrenMap references missing union ${unionId}`,
+        { unionId, childIds }
+      );
+    }
+
+    for (const childId of childIds) {
+      if (!personIds.has(childId)) {
+        fail(
+          "GRAPH_CHILD_MISSING",
+          `childrenMap for union ${unionId} references missing child ${childId}`,
+          { unionId, childId }
+        );
+      }
+
+      const previousUnion = childParentUnion.get(childId);
+      if (previousUnion && previousUnion !== unionId) {
+        fail(
+          "GRAPH_CHILD_MULTIPLE_PARENT_UNIONS",
+          `child ${childId} belongs to multiple parent unions: ${previousUnion} and ${unionId}`,
+          { childId, previousUnionId: previousUnion, unionId }
+        );
+      }
+      if (previousUnion === unionId) {
+        fail(
+          "GRAPH_CHILD_DUPLICATE_IN_UNION",
+          `child ${childId} appears more than once in childrenMap for union ${unionId}`,
+          { childId, unionId }
+        );
+      }
+      childParentUnion.set(childId, unionId);
+    }
+  }
+}
+
+function validateAcyclicParentage(graph: PedigreeGraph) {
+  const childIdsByParent = new Map<string, string[]>();
+
+  for (const [unionId, childIds] of graph.childrenMap.entries()) {
+    const union = graph.unions.get(unionId);
+    if (!union) continue;
+    for (const parentId of union.partners) {
+      for (const childId of childIds) {
+        if (parentId === childId) {
+          fail(
+            "GRAPH_SELF_PARENTAGE",
+            `person ${parentId} cannot be their own parent or child`,
+            { personId: parentId, unionId }
+          );
+        }
+        if (!childIdsByParent.has(parentId)) childIdsByParent.set(parentId, []);
+        childIdsByParent.get(parentId)?.push(childId);
+      }
+    }
+  }
+
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const path: string[] = [];
+
+  const visit = (personId: string) => {
+    if (visiting.has(personId)) {
+      const cycleStart = path.indexOf(personId);
+      const cycle = [...path.slice(cycleStart), personId];
+      fail(
+        "GRAPH_PARENT_CHILD_CYCLE",
+        `parent-child cycle detected: ${cycle.join(" -> ")}`,
+        { cycle }
+      );
+    }
+    if (visited.has(personId)) return;
+
+    visiting.add(personId);
+    path.push(personId);
+    for (const childId of childIdsByParent.get(personId) ?? []) {
+      visit(childId);
+    }
+    path.pop();
+    visiting.delete(personId);
+    visited.add(personId);
+  };
+
+  for (const personId of graph.persons.keys()) {
+    visit(personId);
+  }
+}
+
+function fail(code: string, message: string, details?: unknown): never {
+  throw new GraphValidationError(code, message, details);
 }
 
 export function assertLayoutInvariants(graph: PedigreeGraph, originLinks: OriginLink[] = []) {

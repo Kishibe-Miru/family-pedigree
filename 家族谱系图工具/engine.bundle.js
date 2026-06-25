@@ -1,5 +1,341 @@
 "use strict";
 (() => {
+  // src/layout/layerAssigner.ts
+  function assignLayers(graph) {
+    for (const person of graph.persons.values()) {
+      person.generation = 0;
+    }
+    const limit = graph.persons.size + graph.unions.size + 1;
+    for (let i = 0; i < limit; i++) {
+      let changed = false;
+      for (const union of graph.unions.values()) {
+        const partnerGenerations = union.partners.map((id) => graph.persons.get(id)?.generation ?? 0);
+        const partnerGeneration = Math.max(...partnerGenerations);
+        for (const partnerId of union.partners) {
+          const partner = graph.persons.get(partnerId);
+          if (partner && (partner.generation ?? 0) < partnerGeneration) {
+            partner.generation = partnerGeneration;
+            changed = true;
+          }
+        }
+        const children = graph.childrenMap.get(union.id) ?? [];
+        for (const childId of children) {
+          const child = graph.persons.get(childId);
+          if (!child) continue;
+          const nextGeneration = partnerGeneration + 1;
+          if ((child.generation ?? 0) < nextGeneration) {
+            child.generation = nextGeneration;
+            changed = true;
+          }
+        }
+      }
+      if (!changed) break;
+    }
+    return graph;
+  }
+
+  // src/layout/layoutOrder.ts
+  var orders = /* @__PURE__ */ new WeakMap();
+  function setGenerationOrder(graph, order) {
+    orders.set(graph, order);
+  }
+  function getGenerationOrder(graph) {
+    return orders.get(graph);
+  }
+
+  // src/layout/crossingReducer.ts
+  function reduceCrossings(graph) {
+    for (const [unionId, childIds] of graph.childrenMap.entries()) {
+      graph.childrenMap.set(unionId, sortChildren(graph, childIds));
+    }
+    const order = buildSeedOrder(graph);
+    minimizeByMedian(graph, order);
+    setGenerationOrder(graph, order);
+    return graph;
+  }
+  function buildSeedOrder(graph) {
+    const order = /* @__PURE__ */ new Map();
+    const seen = /* @__PURE__ */ new Set();
+    const parentUnionByChild = buildParentUnionByChild(graph);
+    const unionsByPartner = buildUnionsByPartner(graph);
+    const rootUnions = [...graph.unions.values()].filter((union) => union.partners.every((partnerId) => !parentUnionByChild.has(partnerId))).sort((a, b) => unionSortKey(graph, a).localeCompare(unionSortKey(graph, b)));
+    const push = (personId) => {
+      if (seen.has(personId)) return;
+      seen.add(personId);
+      const generation = graph.persons.get(personId)?.generation ?? 0;
+      if (!order.has(generation)) order.set(generation, []);
+      order.get(generation)?.push(personId);
+    };
+    const visitUnion = (union, mainPersonId) => {
+      const partners = orderPartners(graph, parentUnionByChild, union, mainPersonId);
+      partners.forEach(push);
+      for (const childId of sortChildren(graph, graph.childrenMap.get(union.id) ?? [])) {
+        const childUnions = (unionsByPartner.get(childId) ?? []).filter((childUnion) => childUnion.id !== union.id).sort((a, b) => unionSortKey(graph, a).localeCompare(unionSortKey(graph, b)));
+        if (childUnions.length === 0) {
+          push(childId);
+          continue;
+        }
+        for (const childUnion of childUnions) {
+          visitUnion(childUnion, childId);
+        }
+      }
+    };
+    rootUnions.forEach((union) => visitUnion(union));
+    for (const person of graph.persons.values()) {
+      push(person.id);
+    }
+    return order;
+  }
+  function orderPartners(graph, parentUnionByChild, union, mainPersonId) {
+    if (!mainPersonId) return [...union.partners];
+    const partner = union.partners.find((id) => id !== mainPersonId);
+    if (!partner) return [mainPersonId];
+    return shouldPlaceOriginLeft(graph, parentUnionByChild, mainPersonId) ? [partner, mainPersonId] : [mainPersonId, partner];
+  }
+  function shouldPlaceOriginLeft(graph, parentUnionByChild, mainPersonId) {
+    const parentUnionId = parentUnionByChild.get(mainPersonId);
+    if (!parentUnionId) return false;
+    const siblings = sortChildren(graph, graph.childrenMap.get(parentUnionId) ?? []);
+    const index = siblings.indexOf(mainPersonId);
+    if (index < 0) return false;
+    return index < (siblings.length - 1) / 2;
+  }
+  function minimizeByMedian(graph, order) {
+    for (let i = 0; i < 8; i++) {
+      sweep(graph, order, 1);
+      enforceSiblingBirthOrder(graph, order);
+      enforceSpouseAdjacencyOrder(graph, order);
+      enforceOriginRootOrder(graph, order);
+      sweep(graph, order, -1);
+      enforceSiblingBirthOrder(graph, order);
+      enforceSpouseAdjacencyOrder(graph, order);
+      enforceOriginRootOrder(graph, order);
+    }
+    enforceSiblingBirthOrder(graph, order);
+    enforceSpouseAdjacencyOrder(graph, order);
+    enforceOriginRootOrder(graph, order);
+  }
+  function sweep(graph, order, direction) {
+    const generations = [...order.keys()].sort((a, b) => direction * (a - b));
+    const previousRankByGeneration = /* @__PURE__ */ new Map();
+    for (const generation of generations) {
+      const ids = order.get(generation) ?? [];
+      previousRankByGeneration.set(generation, rankMap(ids));
+    }
+    for (const generation of generations) {
+      const ids = order.get(generation);
+      if (!ids) continue;
+      const neighborGeneration = generation - direction;
+      const neighborRank = previousRankByGeneration.get(neighborGeneration);
+      if (!neighborRank) continue;
+      const blocks = buildHardBlocks(graph, ids);
+      blocks.sort((a, b) => {
+        const left = median(neighborIndexes(graph, a.ids, neighborRank));
+        const right = median(neighborIndexes(graph, b.ids, neighborRank));
+        return left - right || a.index - b.index;
+      });
+      order.set(generation, blocks.flatMap((block) => block.ids));
+    }
+  }
+  function buildHardBlocks(graph, ids) {
+    const idToIndex = new Map(ids.map((id, index) => [id, index]));
+    const used = /* @__PURE__ */ new Set();
+    const blocks = [];
+    for (const id of ids) {
+      if (used.has(id)) continue;
+      const union = [...graph.unions.values()].find(
+        (candidate) => candidate.partners.includes(id) && candidate.partners.every((partnerId) => idToIndex.has(partnerId)) && candidate.partners.length === 2
+      );
+      if (union) {
+        const partners = [...union.partners].sort((a, b) => (idToIndex.get(a) ?? 0) - (idToIndex.get(b) ?? 0));
+        partners.forEach((partnerId) => used.add(partnerId));
+        blocks.push({ ids: partners, index: Math.min(...partners.map((partnerId) => idToIndex.get(partnerId) ?? 0)) });
+      } else {
+        used.add(id);
+        blocks.push({ ids: [id], index: idToIndex.get(id) ?? 0 });
+      }
+    }
+    return blocks.sort((a, b) => a.index - b.index);
+  }
+  function neighborIndexes(graph, ids, neighborRank) {
+    const out = [];
+    const idSet = new Set(ids);
+    for (const union of graph.unions.values()) {
+      const partnersInBlock = union.partners.some((partnerId) => idSet.has(partnerId));
+      if (partnersInBlock) {
+        for (const childId of graph.childrenMap.get(union.id) ?? []) {
+          const rank = neighborRank.get(childId);
+          if (rank != null) out.push(rank);
+        }
+      }
+      const childrenInBlock = (graph.childrenMap.get(union.id) ?? []).some((childId) => idSet.has(childId));
+      if (childrenInBlock) {
+        for (const partnerId of union.partners) {
+          const rank = neighborRank.get(partnerId);
+          if (rank != null) out.push(rank);
+        }
+      }
+    }
+    return out;
+  }
+  function median(values) {
+    if (values.length === 0) return Number.POSITIVE_INFINITY;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  function rankMap(ids) {
+    return new Map(ids.map((id, index) => [id, index]));
+  }
+  function buildParentUnionByChild(graph) {
+    const parentUnionByChild = /* @__PURE__ */ new Map();
+    for (const [unionId, childIds] of graph.childrenMap.entries()) {
+      for (const childId of childIds) {
+        if (!parentUnionByChild.has(childId)) parentUnionByChild.set(childId, unionId);
+      }
+    }
+    return parentUnionByChild;
+  }
+  function buildUnionsByPartner(graph) {
+    const unionsByPartner = /* @__PURE__ */ new Map();
+    for (const union of graph.unions.values()) {
+      for (const partnerId of union.partners) {
+        if (!unionsByPartner.has(partnerId)) unionsByPartner.set(partnerId, []);
+        unionsByPartner.get(partnerId)?.push(union);
+      }
+    }
+    return unionsByPartner;
+  }
+  function sortChildren(graph, childIds) {
+    return [...childIds].sort((a, b) => {
+      const left = graph.persons.get(a)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
+      const right = graph.persons.get(b)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
+      return left - right || a.localeCompare(b);
+    });
+  }
+  function unionSortKey(graph, union) {
+    const generation = Math.min(...union.partners.map((id) => graph.persons.get(id)?.generation ?? 0));
+    return `${generation}:${union.partners.join("|")}:${union.id}`;
+  }
+  function enforceSiblingBirthOrder(graph, order) {
+    for (const [generation, ids] of order.entries()) {
+      const constraints = /* @__PURE__ */ new Map();
+      for (const id of ids) constraints.set(id, /* @__PURE__ */ new Set());
+      for (const childIds of graph.childrenMap.values()) {
+        const sorted = sortChildren(graph, childIds).filter((childId) => (graph.persons.get(childId)?.generation ?? 0) === generation);
+        for (let i = 1; i < sorted.length; i++) {
+          if (!constraints.has(sorted[i - 1]) || !constraints.has(sorted[i])) continue;
+          constraints.get(sorted[i - 1])?.add(sorted[i]);
+        }
+      }
+      order.set(generation, stableTopologicalSort(ids, constraints));
+    }
+  }
+  function enforceOriginRootOrder(graph, order) {
+    const parentUnionByChild = buildParentUnionByChild(graph);
+    const unionsByPartner = buildUnionsByPartner(graph);
+    for (const [generation, ids] of order.entries()) {
+      const constraints = /* @__PURE__ */ new Map();
+      for (const id of ids) constraints.set(id, /* @__PURE__ */ new Set());
+      for (const [parentUnionId, childIds] of graph.childrenMap.entries()) {
+        const sortedChildren2 = sortChildren(graph, childIds);
+        for (let i = 1; i < sortedChildren2.length; i++) {
+          const previousOrigin = originParentUnionForMarriedChild(
+            sortedChildren2[i - 1],
+            parentUnionId,
+            parentUnionByChild,
+            unionsByPartner
+          );
+          const currentOrigin = originParentUnionForMarriedChild(
+            sortedChildren2[i],
+            parentUnionId,
+            parentUnionByChild,
+            unionsByPartner
+          );
+          if (!previousOrigin || !currentOrigin || previousOrigin.id === currentOrigin.id) continue;
+          for (const left of previousOrigin.partners) {
+            if ((graph.persons.get(left)?.generation ?? 0) !== generation || !constraints.has(left)) continue;
+            for (const right of currentOrigin.partners) {
+              if ((graph.persons.get(right)?.generation ?? 0) !== generation || !constraints.has(right)) continue;
+              constraints.get(left)?.add(right);
+            }
+          }
+        }
+      }
+      order.set(generation, stableTopologicalSort(ids, constraints));
+    }
+  }
+  function enforceSpouseAdjacencyOrder(graph, order) {
+    const parentUnionByChild = buildParentUnionByChild(graph);
+    const unionsByPartner = buildUnionsByPartner(graph);
+    for (const [generation, ids] of order.entries()) {
+      const constraints = /* @__PURE__ */ new Map();
+      for (const id of ids) constraints.set(id, /* @__PURE__ */ new Set());
+      for (const [parentUnionId, childIds] of graph.childrenMap.entries()) {
+        const sortedChildren2 = sortChildren(graph, childIds);
+        for (let i = 0; i < sortedChildren2.length; i++) {
+          const childId = sortedChildren2[i];
+          const spouseId = spouseForMarriedChild(childId, parentUnionId, unionsByPartner);
+          if (!spouseId || !constraints.has(childId) || !constraints.has(spouseId)) continue;
+          if ((graph.persons.get(childId)?.generation ?? 0) !== generation) continue;
+          if ((graph.persons.get(spouseId)?.generation ?? 0) !== generation) continue;
+          if (shouldPlaceOriginLeft(graph, parentUnionByChild, childId)) {
+            constraints.get(spouseId)?.add(childId);
+            const previousSibling = sortedChildren2[i - 1];
+            if (previousSibling && constraints.has(previousSibling)) {
+              constraints.get(previousSibling)?.add(spouseId);
+            }
+          } else {
+            constraints.get(childId)?.add(spouseId);
+            const nextSibling = sortedChildren2[i + 1];
+            if (nextSibling && constraints.has(nextSibling)) {
+              constraints.get(spouseId)?.add(nextSibling);
+            }
+          }
+        }
+      }
+      order.set(generation, stableTopologicalSort(ids, constraints));
+    }
+  }
+  function spouseForMarriedChild(childId, parentUnionId, unionsByPartner) {
+    for (const union of unionsByPartner.get(childId) ?? []) {
+      if (union.id === parentUnionId) continue;
+      return union.partners.find((partnerId) => partnerId !== childId);
+    }
+    return void 0;
+  }
+  function originParentUnionForMarriedChild(childId, parentUnionId, parentUnionByChild, unionsByPartner) {
+    for (const union of unionsByPartner.get(childId) ?? []) {
+      if (union.id === parentUnionId) continue;
+      const spouseId = union.partners.find((partnerId) => partnerId !== childId);
+      const spouseParentUnionId = spouseId ? parentUnionByChild.get(spouseId) : void 0;
+      if (!spouseParentUnionId) continue;
+      return [...unionsByPartner.values()].flat().find((candidate) => candidate.id === spouseParentUnionId);
+    }
+    return void 0;
+  }
+  function stableTopologicalSort(ids, constraints) {
+    const originalIndex = new Map(ids.map((id, index) => [id, index]));
+    const indegree = new Map(ids.map((id) => [id, 0]));
+    for (const nextIds of constraints.values()) {
+      for (const next of nextIds) {
+        indegree.set(next, (indegree.get(next) ?? 0) + 1);
+      }
+    }
+    const ready = ids.filter((id) => (indegree.get(id) ?? 0) === 0);
+    const out = [];
+    while (ready.length > 0) {
+      ready.sort((a, b) => (originalIndex.get(a) ?? 0) - (originalIndex.get(b) ?? 0));
+      const current = ready.shift();
+      out.push(current);
+      for (const next of constraints.get(current) ?? []) {
+        indegree.set(next, (indegree.get(next) ?? 0) - 1);
+        if ((indegree.get(next) ?? 0) === 0) ready.push(next);
+      }
+    }
+    return out.length === ids.length ? out : ids;
+  }
+
   // src/layout/boxModel.ts
   var NODE_SIZE = 44;
   var PERSON_GAP = NODE_SIZE * 2.7;
@@ -68,6 +404,178 @@
   }
 
   // src/rules/validation.ts
+  var GraphValidationError = class extends Error {
+    constructor(code, message, details) {
+      super(message);
+      this.name = "GraphValidationError";
+      this.code = code;
+      this.details = details;
+    }
+  };
+  function validateGraph(graph) {
+    const personIds = validatePersonIds(graph);
+    validateUnions(graph, personIds);
+    validateChildrenMap(graph, personIds);
+    validateAcyclicParentage(graph);
+    return graph;
+  }
+  function validatePersonIds(graph) {
+    const personIds = /* @__PURE__ */ new Set();
+    for (const [personId, person] of graph.persons.entries()) {
+      if (!personId) {
+        fail("GRAPH_PERSON_ID_EMPTY", "person id must be non-empty", { personId });
+      }
+      if (!person.id) {
+        fail("GRAPH_PERSON_ID_EMPTY", `person stored at ${personId} has an empty id`, { personId, person });
+      }
+      if (person.id !== personId) {
+        fail(
+          "GRAPH_PERSON_ID_MISMATCH",
+          `person map key ${personId} does not match person id ${person.id}`,
+          { personId, person }
+        );
+      }
+      if (personIds.has(person.id)) {
+        fail("GRAPH_PERSON_ID_DUPLICATE", `duplicate person id ${person.id}`, { personId: person.id });
+      }
+      personIds.add(person.id);
+    }
+    return personIds;
+  }
+  function validateUnions(graph, personIds) {
+    const unionIds = /* @__PURE__ */ new Set();
+    for (const [unionId, union] of graph.unions.entries()) {
+      if (!unionId) {
+        fail("GRAPH_UNION_ID_EMPTY", "union id must be non-empty", { unionId });
+      }
+      if (!union.id) {
+        fail("GRAPH_UNION_ID_EMPTY", `union stored at ${unionId} has an empty id`, { unionId, union });
+      }
+      if (union.id !== unionId) {
+        fail(
+          "GRAPH_UNION_ID_MISMATCH",
+          `union map key ${unionId} does not match union id ${union.id}`,
+          { unionId, union }
+        );
+      }
+      if (unionIds.has(union.id)) {
+        fail("GRAPH_UNION_ID_DUPLICATE", `duplicate union id ${union.id}`, { unionId: union.id });
+      }
+      unionIds.add(union.id);
+      const partners = union.partners;
+      if (partners.length !== 1 && partners.length !== 2) {
+        fail(
+          "GRAPH_UNION_PARTNER_COUNT",
+          `union ${union.id} must have 1 or 2 partners, got ${partners.length}`,
+          { unionId: union.id, partners }
+        );
+      }
+      const seenPartners = /* @__PURE__ */ new Set();
+      for (const partnerId of partners) {
+        if (!personIds.has(partnerId)) {
+          fail(
+            "GRAPH_UNION_PARTNER_MISSING",
+            `union ${union.id} references missing partner ${partnerId}`,
+            { unionId: union.id, partnerId }
+          );
+        }
+        if (seenPartners.has(partnerId)) {
+          fail(
+            "GRAPH_UNION_PARTNER_DUPLICATE",
+            `union ${union.id} lists partner ${partnerId} more than once`,
+            { unionId: union.id, partnerId }
+          );
+        }
+        seenPartners.add(partnerId);
+      }
+    }
+  }
+  function validateChildrenMap(graph, personIds) {
+    const childParentUnion = /* @__PURE__ */ new Map();
+    for (const [unionId, childIds] of graph.childrenMap.entries()) {
+      if (!graph.unions.has(unionId)) {
+        fail(
+          "GRAPH_CHILDREN_UNION_MISSING",
+          `childrenMap references missing union ${unionId}`,
+          { unionId, childIds }
+        );
+      }
+      for (const childId of childIds) {
+        if (!personIds.has(childId)) {
+          fail(
+            "GRAPH_CHILD_MISSING",
+            `childrenMap for union ${unionId} references missing child ${childId}`,
+            { unionId, childId }
+          );
+        }
+        const previousUnion = childParentUnion.get(childId);
+        if (previousUnion && previousUnion !== unionId) {
+          fail(
+            "GRAPH_CHILD_MULTIPLE_PARENT_UNIONS",
+            `child ${childId} belongs to multiple parent unions: ${previousUnion} and ${unionId}`,
+            { childId, previousUnionId: previousUnion, unionId }
+          );
+        }
+        if (previousUnion === unionId) {
+          fail(
+            "GRAPH_CHILD_DUPLICATE_IN_UNION",
+            `child ${childId} appears more than once in childrenMap for union ${unionId}`,
+            { childId, unionId }
+          );
+        }
+        childParentUnion.set(childId, unionId);
+      }
+    }
+  }
+  function validateAcyclicParentage(graph) {
+    const childIdsByParent = /* @__PURE__ */ new Map();
+    for (const [unionId, childIds] of graph.childrenMap.entries()) {
+      const union = graph.unions.get(unionId);
+      if (!union) continue;
+      for (const parentId of union.partners) {
+        for (const childId of childIds) {
+          if (parentId === childId) {
+            fail(
+              "GRAPH_SELF_PARENTAGE",
+              `person ${parentId} cannot be their own parent or child`,
+              { personId: parentId, unionId }
+            );
+          }
+          if (!childIdsByParent.has(parentId)) childIdsByParent.set(parentId, []);
+          childIdsByParent.get(parentId)?.push(childId);
+        }
+      }
+    }
+    const visited = /* @__PURE__ */ new Set();
+    const visiting = /* @__PURE__ */ new Set();
+    const path = [];
+    const visit = (personId) => {
+      if (visiting.has(personId)) {
+        const cycleStart = path.indexOf(personId);
+        const cycle = [...path.slice(cycleStart), personId];
+        fail(
+          "GRAPH_PARENT_CHILD_CYCLE",
+          `parent-child cycle detected: ${cycle.join(" -> ")}`,
+          { cycle }
+        );
+      }
+      if (visited.has(personId)) return;
+      visiting.add(personId);
+      path.push(personId);
+      for (const childId of childIdsByParent.get(personId) ?? []) {
+        visit(childId);
+      }
+      path.pop();
+      visiting.delete(personId);
+      visited.add(personId);
+    };
+    for (const personId of graph.persons.keys()) {
+      visit(personId);
+    }
+  }
+  function fail(code, message, details) {
+    throw new GraphValidationError(code, message, details);
+  }
   function assertLayoutInvariants(graph, originLinks = []) {
     assertParentDropCenteredOverChildren(graph, originLinks);
     assertOriginLinks(graph, originLinks);
@@ -212,7 +720,7 @@
   }
 
   // src/layout/familyForest.ts
-  function buildParentUnionByChild(graph) {
+  function buildParentUnionByChild2(graph) {
     const parentUnionByChild = /* @__PURE__ */ new Map();
     for (const [unionId, childIds] of graph.childrenMap.entries()) {
       for (const childId of childIds) {
@@ -223,7 +731,7 @@
     }
     return parentUnionByChild;
   }
-  function buildUnionsByPartner(graph) {
+  function buildUnionsByPartner2(graph) {
     const unionsByPartner = /* @__PURE__ */ new Map();
     for (const union of graph.unions.values()) {
       for (const partnerId of union.partners) {
@@ -241,8 +749,8 @@
     });
   }
   function buildForest(graph) {
-    const parentUnionByChild = buildParentUnionByChild(graph);
-    const unionsByPartner = buildUnionsByPartner(graph);
+    const parentUnionByChild = buildParentUnionByChild2(graph);
+    const unionsByPartner = buildUnionsByPartner2(graph);
     const visitedMainPeople = /* @__PURE__ */ new Set();
     const visitedUnions = /* @__PURE__ */ new Set();
     const roots = [];
@@ -308,9 +816,9 @@
   }
   function orderPartnersForMain(graph, parentUnionByChild, union, mainPersonId, originOf) {
     if (!mainPersonId || !originOf || union.partners.length !== 2) return [...union.partners];
-    return shouldPlaceOriginLeft(graph, parentUnionByChild, mainPersonId) ? [originOf, mainPersonId] : [mainPersonId, originOf];
+    return shouldPlaceOriginLeft2(graph, parentUnionByChild, mainPersonId) ? [originOf, mainPersonId] : [mainPersonId, originOf];
   }
-  function shouldPlaceOriginLeft(graph, parentUnionByChild, mainPersonId) {
+  function shouldPlaceOriginLeft2(graph, parentUnionByChild, mainPersonId) {
     const parentUnionId = parentUnionByChild.get(mainPersonId);
     if (!parentUnionId) return false;
     const siblings = sortedChildren(graph, parentUnionId);
@@ -330,15 +838,6 @@
   }
   function rootForBox(roots, target) {
     return roots.find((root) => root === target || containsBox(root, target)) ?? null;
-  }
-
-  // src/layout/layoutOrder.ts
-  var orders = /* @__PURE__ */ new WeakMap();
-  function setGenerationOrder(graph, order) {
-    orders.set(graph, order);
-  }
-  function getGenerationOrder(graph) {
-    return orders.get(graph);
   }
 
   // src/layout/coordinateSolver.ts
@@ -531,6 +1030,15 @@
     if (box.kind === "family" && box.top) return primaryAnchorX(box.top);
     const anchorMember = box.mainPersonId ?? box.members[0];
     return anchorMember ? box.anchorX(anchorMember) : box.cx;
+  }
+  function siblingAnchorGap(previous, current) {
+    if (!requiresSiblingFamilySpace(previous) && !requiresSiblingFamilySpace(current)) return PERSON_GAP;
+    const previousRight = rightOf(previous) - primaryAnchorX(previous);
+    const currentLeft = primaryAnchorX(current) - leftOf(current);
+    return Math.max(PERSON_GAP, previousRight + MIN_GAP + currentLeft);
+  }
+  function requiresSiblingFamilySpace(box) {
+    return box.kind === "family" && (box.children?.length ?? 0) > 0;
   }
   function assertFamilyAnchors(box, expectedDropX) {
     if (!box.top || !box.children || box.children.length === 0) return;
@@ -935,8 +1443,9 @@
         const previous = box.children[i - 1];
         const current = box.children[i];
         const gap = primaryAnchorX(current) - primaryAnchorX(previous);
-        if (gap <= 3 * PERSON_GAP) continue;
-        const dx = (gap - PERSON_GAP) / 2;
+        const desiredGap = siblingAnchorGap(previous, current);
+        if (gap <= desiredGap + 2 * PERSON_GAP) continue;
+        const dx = (gap - desiredGap) / 2;
         shiftSubtree(previous, dx);
         const currentMovers = [current];
         const originRoot = originByCoreFamily.get(current);
@@ -977,7 +1486,7 @@
         const previous = box.children[i - 1];
         const current = box.children[i];
         const gap = primaryAnchorX(current) - primaryAnchorX(previous);
-        const excess = gap - PERSON_GAP;
+        const excess = gap - siblingAnchorGap(previous, current);
         if (excess <= 0.5) continue;
         const movers = [current];
         const originRoot = originByCoreFamily.get(current);
@@ -1419,366 +1928,23 @@
     return out;
   }
 
-  // src/layout/crossingReducer.ts
-  function reduceCrossings(graph) {
-    for (const [unionId, childIds] of graph.childrenMap.entries()) {
-      graph.childrenMap.set(unionId, sortChildren(graph, childIds));
-    }
-    const order = buildSeedOrder(graph);
-    minimizeByMedian(graph, order);
-    setGenerationOrder(graph, order);
-    return graph;
-  }
-  function buildSeedOrder(graph) {
-    const order = /* @__PURE__ */ new Map();
-    const seen = /* @__PURE__ */ new Set();
-    const parentUnionByChild = buildParentUnionByChild2(graph);
-    const unionsByPartner = buildUnionsByPartner2(graph);
-    const rootUnions = [...graph.unions.values()].filter((union) => union.partners.every((partnerId) => !parentUnionByChild.has(partnerId))).sort((a, b) => unionSortKey(graph, a).localeCompare(unionSortKey(graph, b)));
-    const push = (personId) => {
-      if (seen.has(personId)) return;
-      seen.add(personId);
-      const generation = graph.persons.get(personId)?.generation ?? 0;
-      if (!order.has(generation)) order.set(generation, []);
-      order.get(generation)?.push(personId);
-    };
-    const visitUnion = (union, mainPersonId) => {
-      const partners = orderPartners(graph, parentUnionByChild, union, mainPersonId);
-      partners.forEach(push);
-      for (const childId of sortChildren(graph, graph.childrenMap.get(union.id) ?? [])) {
-        const childUnions = (unionsByPartner.get(childId) ?? []).filter((childUnion) => childUnion.id !== union.id).sort((a, b) => unionSortKey(graph, a).localeCompare(unionSortKey(graph, b)));
-        if (childUnions.length === 0) {
-          push(childId);
-          continue;
-        }
-        for (const childUnion of childUnions) {
-          visitUnion(childUnion, childId);
-        }
-      }
-    };
-    rootUnions.forEach((union) => visitUnion(union));
-    for (const person of graph.persons.values()) {
-      push(person.id);
-    }
-    return order;
-  }
-  function orderPartners(graph, parentUnionByChild, union, mainPersonId) {
-    if (!mainPersonId) return [...union.partners];
-    const partner = union.partners.find((id) => id !== mainPersonId);
-    if (!partner) return [mainPersonId];
-    return shouldPlaceOriginLeft2(graph, parentUnionByChild, mainPersonId) ? [partner, mainPersonId] : [mainPersonId, partner];
-  }
-  function shouldPlaceOriginLeft2(graph, parentUnionByChild, mainPersonId) {
-    const parentUnionId = parentUnionByChild.get(mainPersonId);
-    if (!parentUnionId) return false;
-    const siblings = sortChildren(graph, graph.childrenMap.get(parentUnionId) ?? []);
-    const index = siblings.indexOf(mainPersonId);
-    if (index < 0) return false;
-    return index < (siblings.length - 1) / 2;
-  }
-  function minimizeByMedian(graph, order) {
-    for (let i = 0; i < 8; i++) {
-      sweep(graph, order, 1);
-      enforceSiblingBirthOrder(graph, order);
-      enforceSpouseAdjacencyOrder(graph, order);
-      enforceOriginRootOrder(graph, order);
-      sweep(graph, order, -1);
-      enforceSiblingBirthOrder(graph, order);
-      enforceSpouseAdjacencyOrder(graph, order);
-      enforceOriginRootOrder(graph, order);
-    }
-    enforceSiblingBirthOrder(graph, order);
-    enforceSpouseAdjacencyOrder(graph, order);
-    enforceOriginRootOrder(graph, order);
-  }
-  function sweep(graph, order, direction) {
-    const generations = [...order.keys()].sort((a, b) => direction * (a - b));
-    const previousRankByGeneration = /* @__PURE__ */ new Map();
-    for (const generation of generations) {
-      const ids = order.get(generation) ?? [];
-      previousRankByGeneration.set(generation, rankMap(ids));
-    }
-    for (const generation of generations) {
-      const ids = order.get(generation);
-      if (!ids) continue;
-      const neighborGeneration = generation - direction;
-      const neighborRank = previousRankByGeneration.get(neighborGeneration);
-      if (!neighborRank) continue;
-      const blocks = buildHardBlocks(graph, ids);
-      blocks.sort((a, b) => {
-        const left = median(neighborIndexes(graph, a.ids, neighborRank));
-        const right = median(neighborIndexes(graph, b.ids, neighborRank));
-        return left - right || a.index - b.index;
-      });
-      order.set(generation, blocks.flatMap((block) => block.ids));
-    }
-  }
-  function buildHardBlocks(graph, ids) {
-    const idToIndex = new Map(ids.map((id, index) => [id, index]));
-    const used = /* @__PURE__ */ new Set();
-    const blocks = [];
-    for (const id of ids) {
-      if (used.has(id)) continue;
-      const union = [...graph.unions.values()].find(
-        (candidate) => candidate.partners.includes(id) && candidate.partners.every((partnerId) => idToIndex.has(partnerId)) && candidate.partners.length === 2
-      );
-      if (union) {
-        const partners = [...union.partners].sort((a, b) => (idToIndex.get(a) ?? 0) - (idToIndex.get(b) ?? 0));
-        partners.forEach((partnerId) => used.add(partnerId));
-        blocks.push({ ids: partners, index: Math.min(...partners.map((partnerId) => idToIndex.get(partnerId) ?? 0)) });
-      } else {
-        used.add(id);
-        blocks.push({ ids: [id], index: idToIndex.get(id) ?? 0 });
-      }
-    }
-    return blocks.sort((a, b) => a.index - b.index);
-  }
-  function neighborIndexes(graph, ids, neighborRank) {
-    const out = [];
-    const idSet = new Set(ids);
-    for (const union of graph.unions.values()) {
-      const partnersInBlock = union.partners.some((partnerId) => idSet.has(partnerId));
-      if (partnersInBlock) {
-        for (const childId of graph.childrenMap.get(union.id) ?? []) {
-          const rank = neighborRank.get(childId);
-          if (rank != null) out.push(rank);
-        }
-      }
-      const childrenInBlock = (graph.childrenMap.get(union.id) ?? []).some((childId) => idSet.has(childId));
-      if (childrenInBlock) {
-        for (const partnerId of union.partners) {
-          const rank = neighborRank.get(partnerId);
-          if (rank != null) out.push(rank);
-        }
-      }
-    }
-    return out;
-  }
-  function median(values) {
-    if (values.length === 0) return Number.POSITIVE_INFINITY;
-    const sorted = [...values].sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-  }
-  function rankMap(ids) {
-    return new Map(ids.map((id, index) => [id, index]));
-  }
-  function buildParentUnionByChild2(graph) {
-    const parentUnionByChild = /* @__PURE__ */ new Map();
-    for (const [unionId, childIds] of graph.childrenMap.entries()) {
-      for (const childId of childIds) {
-        if (!parentUnionByChild.has(childId)) parentUnionByChild.set(childId, unionId);
-      }
-    }
-    return parentUnionByChild;
-  }
-  function buildUnionsByPartner2(graph) {
-    const unionsByPartner = /* @__PURE__ */ new Map();
-    for (const union of graph.unions.values()) {
-      for (const partnerId of union.partners) {
-        if (!unionsByPartner.has(partnerId)) unionsByPartner.set(partnerId, []);
-        unionsByPartner.get(partnerId)?.push(union);
-      }
-    }
-    return unionsByPartner;
-  }
-  function sortChildren(graph, childIds) {
-    return [...childIds].sort((a, b) => {
-      const left = graph.persons.get(a)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-      const right = graph.persons.get(b)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-      return left - right || a.localeCompare(b);
-    });
-  }
-  function unionSortKey(graph, union) {
-    const generation = Math.min(...union.partners.map((id) => graph.persons.get(id)?.generation ?? 0));
-    return `${generation}:${union.partners.join("|")}:${union.id}`;
-  }
-  function enforceSiblingBirthOrder(graph, order) {
-    for (const [generation, ids] of order.entries()) {
-      const constraints = /* @__PURE__ */ new Map();
-      for (const id of ids) constraints.set(id, /* @__PURE__ */ new Set());
-      for (const childIds of graph.childrenMap.values()) {
-        const sorted = sortChildren(graph, childIds).filter((childId) => (graph.persons.get(childId)?.generation ?? 0) === generation);
-        for (let i = 1; i < sorted.length; i++) {
-          if (!constraints.has(sorted[i - 1]) || !constraints.has(sorted[i])) continue;
-          constraints.get(sorted[i - 1])?.add(sorted[i]);
-        }
-      }
-      order.set(generation, stableTopologicalSort(ids, constraints));
-    }
-  }
-  function enforceOriginRootOrder(graph, order) {
-    const parentUnionByChild = buildParentUnionByChild2(graph);
-    const unionsByPartner = buildUnionsByPartner2(graph);
-    for (const [generation, ids] of order.entries()) {
-      const constraints = /* @__PURE__ */ new Map();
-      for (const id of ids) constraints.set(id, /* @__PURE__ */ new Set());
-      for (const [parentUnionId, childIds] of graph.childrenMap.entries()) {
-        const sortedChildren2 = sortChildren(graph, childIds);
-        for (let i = 1; i < sortedChildren2.length; i++) {
-          const previousOrigin = originParentUnionForMarriedChild(
-            sortedChildren2[i - 1],
-            parentUnionId,
-            parentUnionByChild,
-            unionsByPartner
-          );
-          const currentOrigin = originParentUnionForMarriedChild(
-            sortedChildren2[i],
-            parentUnionId,
-            parentUnionByChild,
-            unionsByPartner
-          );
-          if (!previousOrigin || !currentOrigin || previousOrigin.id === currentOrigin.id) continue;
-          for (const left of previousOrigin.partners) {
-            if ((graph.persons.get(left)?.generation ?? 0) !== generation || !constraints.has(left)) continue;
-            for (const right of currentOrigin.partners) {
-              if ((graph.persons.get(right)?.generation ?? 0) !== generation || !constraints.has(right)) continue;
-              constraints.get(left)?.add(right);
-            }
-          }
-        }
-      }
-      order.set(generation, stableTopologicalSort(ids, constraints));
-    }
-  }
-  function enforceSpouseAdjacencyOrder(graph, order) {
-    const parentUnionByChild = buildParentUnionByChild2(graph);
-    const unionsByPartner = buildUnionsByPartner2(graph);
-    for (const [generation, ids] of order.entries()) {
-      const constraints = /* @__PURE__ */ new Map();
-      for (const id of ids) constraints.set(id, /* @__PURE__ */ new Set());
-      for (const [parentUnionId, childIds] of graph.childrenMap.entries()) {
-        const sortedChildren2 = sortChildren(graph, childIds);
-        for (let i = 0; i < sortedChildren2.length; i++) {
-          const childId = sortedChildren2[i];
-          const spouseId = spouseForMarriedChild(childId, parentUnionId, unionsByPartner);
-          if (!spouseId || !constraints.has(childId) || !constraints.has(spouseId)) continue;
-          if ((graph.persons.get(childId)?.generation ?? 0) !== generation) continue;
-          if ((graph.persons.get(spouseId)?.generation ?? 0) !== generation) continue;
-          if (shouldPlaceOriginLeft2(graph, parentUnionByChild, childId)) {
-            constraints.get(spouseId)?.add(childId);
-            const previousSibling = sortedChildren2[i - 1];
-            if (previousSibling && constraints.has(previousSibling)) {
-              constraints.get(previousSibling)?.add(spouseId);
-            }
-          } else {
-            constraints.get(childId)?.add(spouseId);
-            const nextSibling = sortedChildren2[i + 1];
-            if (nextSibling && constraints.has(nextSibling)) {
-              constraints.get(spouseId)?.add(nextSibling);
-            }
-          }
-        }
-      }
-      order.set(generation, stableTopologicalSort(ids, constraints));
-    }
-  }
-  function spouseForMarriedChild(childId, parentUnionId, unionsByPartner) {
-    for (const union of unionsByPartner.get(childId) ?? []) {
-      if (union.id === parentUnionId) continue;
-      return union.partners.find((partnerId) => partnerId !== childId);
-    }
-    return void 0;
-  }
-  function originParentUnionForMarriedChild(childId, parentUnionId, parentUnionByChild, unionsByPartner) {
-    for (const union of unionsByPartner.get(childId) ?? []) {
-      if (union.id === parentUnionId) continue;
-      const spouseId = union.partners.find((partnerId) => partnerId !== childId);
-      const spouseParentUnionId = spouseId ? parentUnionByChild.get(spouseId) : void 0;
-      if (!spouseParentUnionId) continue;
-      return [...unionsByPartner.values()].flat().find((candidate) => candidate.id === spouseParentUnionId);
-    }
-    return void 0;
-  }
-  function stableTopologicalSort(ids, constraints) {
-    const originalIndex = new Map(ids.map((id, index) => [id, index]));
-    const indegree = new Map(ids.map((id) => [id, 0]));
-    for (const nextIds of constraints.values()) {
-      for (const next of nextIds) {
-        indegree.set(next, (indegree.get(next) ?? 0) + 1);
-      }
-    }
-    const ready = ids.filter((id) => (indegree.get(id) ?? 0) === 0);
-    const out = [];
-    while (ready.length > 0) {
-      ready.sort((a, b) => (originalIndex.get(a) ?? 0) - (originalIndex.get(b) ?? 0));
-      const current = ready.shift();
-      out.push(current);
-      for (const next of constraints.get(current) ?? []) {
-        indegree.set(next, (indegree.get(next) ?? 0) - 1);
-        if ((indegree.get(next) ?? 0) === 0) ready.push(next);
-      }
-    }
-    return out.length === ids.length ? out : ids;
+  // src/layout/computeLayout.ts
+  function computeLayout(graph) {
+    let g = assignLayers(graph);
+    g = reduceCrossings(g);
+    g = assignCoordinates(g);
+    return g;
   }
 
-  // src/layout/layerAssigner.ts
-  function assignLayers(graph) {
-    for (const person of graph.persons.values()) {
-      person.generation = 0;
-    }
-    const limit = graph.persons.size + graph.unions.size + 1;
-    for (let i = 0; i < limit; i++) {
-      let changed = false;
-      for (const union of graph.unions.values()) {
-        const partnerGenerations = union.partners.map((id) => graph.persons.get(id)?.generation ?? 0);
-        const partnerGeneration = Math.max(...partnerGenerations);
-        for (const partnerId of union.partners) {
-          const partner = graph.persons.get(partnerId);
-          if (partner && (partner.generation ?? 0) < partnerGeneration) {
-            partner.generation = partnerGeneration;
-            changed = true;
-          }
-        }
-        const children = graph.childrenMap.get(union.id) ?? [];
-        for (const childId of children) {
-          const child = graph.persons.get(childId);
-          if (!child) continue;
-          const nextGeneration = partnerGeneration + 1;
-          if ((child.generation ?? 0) < nextGeneration) {
-            child.generation = nextGeneration;
-            changed = true;
-          }
-        }
-      }
-      if (!changed) break;
-    }
-    return graph;
-  }
-
-  // src/browser/entry.ts
-  function layout(input) {
-    try {
-      const graph = {
-        persons: new Map(input.persons.map((person) => [
-          person.id,
-          {
-            id: person.id,
-            sex: person.sex,
-            birthOrder: person.birthOrder
-          }
-        ])),
-        unions: new Map(input.unions.map((union) => [
-          union.id,
-          {
-            id: union.id,
-            partners: union.partners
-          }
-        ])),
-        childrenMap: new Map(input.childrenMap)
-      };
-      assignLayers(graph);
-      reduceCrossings(graph);
-      assignCoordinates(graph);
-      return buildLayoutResult(graph, input);
-    } catch {
-      return null;
-    }
-  }
+  // src/layout/layoutResultBuilder.ts
+  var R = NODE_SIZE / 2;
+  var SIBSHIP_DROP = NODE_SIZE * 1.25;
   function buildLayoutResult(graph, input) {
     const nodes = [...graph.persons.values()].map((person) => ({
       id: person.id,
       sex: person.sex,
+      affected: person.affected,
+      carrier: person.carrier,
       x: person.x ?? 0,
       y: person.y ?? 0,
       generation: person.generation ?? 0
@@ -1804,6 +1970,72 @@
       generationLabels
     };
   }
+  function applyManualNodePositionsToLayout(options) {
+    const peopleById = new Map(options.people.map((person) => [person.id, person]));
+    const nodes = options.layout.nodes.map((node) => {
+      const person = peopleById.get(node.id);
+      if (!person?.manual) return { ...node };
+      return {
+        ...node,
+        x: Number.isFinite(person.x) ? person.x : node.x,
+        y: Number.isFinite(person.y) ? person.y : node.y
+      };
+    });
+    const positions = nodes.map((node) => ({
+      id: node.id,
+      x: node.x,
+      y: node.y,
+      generation: node.generation
+    }));
+    const graph = graphFromLayout(nodes, options.unions, options.childrenMap);
+    validateGraph(graph);
+    const inputPeople = new Map(options.people.map((person) => [person.id, person]));
+    const inputUnions = new Map(options.unions.map((union) => [union.id, union]));
+    const unionAnchors = buildUnionAnchors(graph);
+    const relationshipSegments = buildRelationshipSegments(graph, inputPeople, inputUnions, unionAnchors);
+    const bounds = computeBounds(nodes);
+    const generationLabels = buildGenerationLabels(nodes, bounds);
+    return {
+      ...options.layout,
+      nodes,
+      positions,
+      relationshipSegments,
+      unionAnchors,
+      bounds,
+      generationLabels
+    };
+  }
+  function graphFromLayout(nodes, unions, childrenMap) {
+    return {
+      persons: new Map(nodes.map((node) => [
+        node.id,
+        {
+          id: node.id,
+          sex: node.sex,
+          generation: node.generation,
+          x: node.x,
+          y: node.y
+        }
+      ])),
+      unions: new Map(unions.map((union) => [
+        union.id,
+        {
+          id: union.id,
+          partners: normalizePartners(union)
+        }
+      ])),
+      childrenMap: new Map(childrenMap.map(([unionId, childIds]) => [unionId, [...childIds]]))
+    };
+  }
+  function normalizePartners(union) {
+    if (union.partners.length === 1) return [union.partners[0]];
+    if (union.partners.length === 2) return [union.partners[0], union.partners[1]];
+    throw new GraphValidationError(
+      "GRAPH_UNION_PARTNER_COUNT",
+      `union ${union.id} must have 1 or 2 partners, got ${union.partners.length}`,
+      { unionId: union.id, partners: union.partners }
+    );
+  }
   function buildUnionAnchors(graph) {
     return [...graph.unions.values()].flatMap((union) => {
       const partners = union.partners.map((id) => graph.persons.get(id)).filter(hasCoordinates);
@@ -1820,6 +2052,8 @@
     const segments = [];
     const anchors = new Map(unionAnchors.map((anchor) => [anchor.unionId, anchor]));
     for (const union of graph.unions.values()) {
+      const parentIds = [...union.partners];
+      const childIds = [...graph.childrenMap.get(union.id) ?? []];
       const partners = union.partners.map((id) => graph.persons.get(id)).filter(hasCoordinates);
       if (partners.length === 2) {
         const [left, right] = partners[0].x <= partners[1].x ? [partners[0], partners[1]] : [partners[1], partners[0]];
@@ -1832,12 +2066,20 @@
         segments.push({
           id: `${union.id}:marriage`,
           type: "marriage",
+          kind: "marriage",
           unionId: union.id,
+          partnerIds: parentIds,
+          parentIds,
+          source: {
+            unionId: union.id,
+            parentIds,
+            personIds: parentIds
+          },
           points,
           doubleLine: !!inputUnions.get(union.id)?.consanguineous
         });
       }
-      const kids = (graph.childrenMap.get(union.id) ?? []).map((id) => graph.persons.get(id)).filter(hasCoordinates);
+      const kids = childIds.map((id) => graph.persons.get(id)).filter(hasCoordinates);
       if (kids.length === 0 || partners.length === 0) continue;
       const anchor = anchors.get(union.id);
       const dropX = anchor?.x ?? avg(partners.map((person) => person.x));
@@ -1850,14 +2092,28 @@
       segments.push({
         id: `${union.id}:descent`,
         type: "descent",
+        kind: "parent-drop",
         unionId: union.id,
+        parentIds,
+        childIds,
+        source: {
+          unionId: union.id,
+          parentIds,
+          childIds
+        },
         points: [{ x: dropX, y: dropTopY }, { x: dropX, y: siblingY }]
       });
       if (kids.length > 1 || Math.abs(kids[0].x - dropX) >= 0.5) {
         segments.push({
           id: `${union.id}:sibling`,
           type: "sibling",
+          kind: "sibling-line",
           unionId: union.id,
+          childIds,
+          source: {
+            unionId: union.id,
+            childIds
+          },
           points: [{ x: Math.min(minKidX, dropX), y: siblingY }, { x: Math.max(maxKidX, dropX), y: siblingY }]
         });
       }
@@ -1867,8 +2123,15 @@
             segments.push({
               id: `${union.id}:${child.id}:individual`,
               type: "individual",
+              kind: "child-drop",
               unionId: union.id,
               personId: child.id,
+              childIds: [child.id],
+              source: {
+                unionId: union.id,
+                childIds: [child.id],
+                personIds: [child.id]
+              },
               points: [{ x: child.x, y: siblingY }, { x: child.x, y: child.y - R }]
             });
           }
@@ -1880,9 +2143,16 @@
           segments.push({
             id: `${union.id}:${child.id}:twin`,
             type: "individual",
+            kind: "twin",
             unionId: union.id,
             personId: child.id,
+            childIds: [child.id],
             twinGroup: group.twinGroup,
+            source: {
+              unionId: union.id,
+              childIds: [child.id],
+              personIds: [child.id]
+            },
             points: [{ x: apexX, y: siblingY }, { x: child.x, y: forkY }, { x: child.x, y: child.y - R }]
           });
         }
@@ -1893,8 +2163,15 @@
           segments.push({
             id: `${union.id}:${group.twinGroup}:twin-bar`,
             type: "twin-bar",
+            kind: "twin-bar",
             unionId: union.id,
+            childIds: group.children.map((child) => child.id),
             twinGroup: group.twinGroup,
+            source: {
+              unionId: union.id,
+              childIds: group.children.map((child) => child.id),
+              personIds: group.children.map((child) => child.id)
+            },
             points: [
               { x: apexX + (xs[0] - apexX) * t, y: barY },
               { x: apexX + (xs[xs.length - 1] - apexX) * t, y: barY }
@@ -1968,14 +2245,179 @@
     }
     return out || "I";
   }
-  var R = NODE_SIZE / 2;
-  var SIBSHIP_DROP = NODE_SIZE * 1.25;
+
+  // src/browser/entry.ts
+  function layout(input) {
+    try {
+      validateLayoutInput(input);
+      const graph = layoutInputToGraph(input);
+      const validGraph = validateGraph(graph);
+      const laidOutGraph = computeLayout(validGraph);
+      return { ok: true, layout: buildLayoutResult(laidOutGraph, input) };
+    } catch (error) {
+      const failure = layoutFailure(error);
+      console.error("[PedigreeEngine] layout failed:", failure.error.message, failure.error);
+      return failure;
+    }
+  }
+  function layoutResult(input) {
+    const response = layout(input);
+    return response.ok ? response.layout : null;
+  }
+  function layoutPositions(input) {
+    const result = layoutResult(input);
+    return result ? result.positions : null;
+  }
   function legacyPositions(result) {
     return result.positions;
   }
-  function layoutPositions(input) {
-    const result = layout(input);
-    return result ? result.positions : null;
+  function validateLayoutInput(input) {
+    if (!input || !Array.isArray(input.persons)) {
+      throw new GraphValidationError("LAYOUT_INPUT_PERSONS_INVALID", "layout input persons must be an array", { input });
+    }
+    if (!Array.isArray(input.unions)) {
+      throw new GraphValidationError("LAYOUT_INPUT_UNIONS_INVALID", "layout input unions must be an array", { input });
+    }
+    if (!Array.isArray(input.childrenMap)) {
+      throw new GraphValidationError("LAYOUT_INPUT_CHILDREN_MAP_INVALID", "layout input childrenMap must be an array of [unionId, childIds] entries", { input });
+    }
+    assertUniqueIds(input.persons.map((person) => person.id), "person");
+    assertUniqueIds(input.unions.map((union) => union.id), "union");
+    validateUnionPartners(input);
+    validateChildrenMapEntries(input.childrenMap);
   }
-  globalThis.PedigreeEngine = { layout };
+  function layoutInputToGraph(input) {
+    return {
+      persons: new Map(input.persons.map((person) => [
+        person.id,
+        {
+          id: person.id,
+          sex: person.sex,
+          birthOrder: person.birthOrder
+        }
+      ])),
+      unions: new Map(input.unions.map((union) => [
+        union.id,
+        {
+          id: union.id,
+          partners: normalizePartners(union)
+        }
+      ])),
+      childrenMap: new Map(input.childrenMap.map(([unionId, childIds]) => [unionId, [...childIds]]))
+    };
+  }
+  function assertUniqueIds(ids, kind) {
+    const seen = /* @__PURE__ */ new Set();
+    for (const id of ids) {
+      if (!id) {
+        throw new GraphValidationError(
+          kind === "person" ? "GRAPH_PERSON_ID_EMPTY" : "GRAPH_UNION_ID_EMPTY",
+          `${kind} id must be non-empty`,
+          { id }
+        );
+      }
+      if (seen.has(id)) {
+        throw new GraphValidationError(
+          kind === "person" ? "GRAPH_PERSON_ID_DUPLICATE" : "GRAPH_UNION_ID_DUPLICATE",
+          `duplicate ${kind} id ${id}`,
+          { id }
+        );
+      }
+      seen.add(id);
+    }
+  }
+  function validateUnionPartners(input) {
+    for (const union of input.unions) {
+      if (!Array.isArray(union.partners)) {
+        throw new GraphValidationError(
+          "LAYOUT_INPUT_UNION_PARTNERS_INVALID",
+          `union ${union.id} partners must be an array`,
+          { unionId: union.id, partners: union.partners }
+        );
+      }
+      for (const partnerId of union.partners) {
+        if (!partnerId) {
+          throw new GraphValidationError(
+            "LAYOUT_INPUT_UNION_PARTNER_EMPTY",
+            `union ${union.id} contains an empty partner id`,
+            { unionId: union.id, partners: union.partners }
+          );
+        }
+      }
+    }
+  }
+  function validateChildrenMapEntries(childrenMap) {
+    const seenUnionIds = /* @__PURE__ */ new Set();
+    for (const entry of childrenMap) {
+      if (!Array.isArray(entry) || entry.length !== 2 || !Array.isArray(entry[1])) {
+        throw new GraphValidationError(
+          "LAYOUT_INPUT_CHILDREN_MAP_ENTRY_INVALID",
+          "childrenMap entries must be [unionId, childIds[]]",
+          { entry }
+        );
+      }
+      const [unionId, childIds] = entry;
+      if (!unionId) {
+        throw new GraphValidationError(
+          "LAYOUT_INPUT_CHILDREN_MAP_UNION_EMPTY",
+          "childrenMap union id must be non-empty",
+          { entry }
+        );
+      }
+      if (seenUnionIds.has(unionId)) {
+        throw new GraphValidationError(
+          "LAYOUT_INPUT_CHILDREN_MAP_UNION_DUPLICATE",
+          `childrenMap contains duplicate union entry ${unionId}`,
+          { unionId }
+        );
+      }
+      seenUnionIds.add(unionId);
+      const seenChildIds = /* @__PURE__ */ new Set();
+      for (const childId of childIds) {
+        if (!childId) {
+          throw new GraphValidationError(
+            "LAYOUT_INPUT_CHILDREN_MAP_CHILD_EMPTY",
+            `childrenMap entry ${unionId} contains an empty child id`,
+            { unionId, childIds }
+          );
+        }
+        if (seenChildIds.has(childId)) {
+          throw new GraphValidationError(
+            "LAYOUT_INPUT_CHILDREN_MAP_CHILD_DUPLICATE",
+            `childrenMap entry ${unionId} contains duplicate child id ${childId}`,
+            { unionId, childId }
+          );
+        }
+        seenChildIds.add(childId);
+      }
+    }
+  }
+  function layoutFailure(error) {
+    if (error instanceof GraphValidationError) {
+      return {
+        ok: false,
+        error: {
+          message: error.message,
+          code: error.code,
+          details: error.details
+        }
+      };
+    }
+    if (error instanceof Error) {
+      return {
+        ok: false,
+        error: {
+          message: error.message || "layout failed"
+        }
+      };
+    }
+    return {
+      ok: false,
+      error: {
+        message: "layout failed",
+        details: error
+      }
+    };
+  }
+  globalThis.PedigreeEngine = { layout, layoutResult, layoutPositions, applyManualNodePositionsToLayout };
 })();
