@@ -13,6 +13,10 @@
 
 ## 使用方式
 
+### 本机直接使用 6.0.1
+
+当前 6.0.1 发布版是纯前端工具，核心入口在 `家族谱系图工具/index.html`。不需要安装后端服务，也不需要联网。
+
 直接双击打开：
 
 ```text
@@ -20,6 +24,65 @@
 ```
 
 推荐使用 Chrome、Edge 或 Firefox。
+
+数据默认保存在当前浏览器的本地存储中；更换浏览器、清理浏览器数据或换电脑时，请先使用页面中的“保存项目”导出项目文件，再在目标浏览器中“加载项目”。
+
+### Apache 局域网部署
+
+如果需要在同一局域网内让多台电脑访问，可以把 `家族谱系图工具/` 作为静态目录交给 Apache 托管。这个项目没有服务器端数据库，Apache 只负责提供 HTML、CSS、JS 和打包后的 `engine.bundle.js`。
+
+一种简单做法是把目录复制到 Apache 的站点目录，例如：
+
+```text
+C:\Apache24\htdocs\pedigree\
+```
+
+目录结构应保持为：
+
+```text
+C:\Apache24\htdocs\pedigree\index.html
+C:\Apache24\htdocs\pedigree\app.js
+C:\Apache24\htdocs\pedigree\engine.bundle.js
+C:\Apache24\htdocs\pedigree\styles.css
+C:\Apache24\htdocs\pedigree\ui\canvas.js
+```
+
+也可以在 Apache 配置中使用 Alias 指向项目目录：
+
+```apache
+Alias /pedigree/ "I:/AI文件夹/AI Files/Codex/2605家族谱系图/家族谱系图工具/"
+
+<Directory "I:/AI文件夹/AI Files/Codex/2605家族谱系图/家族谱系图工具/">
+    Options Indexes FollowSymLinks
+    AllowOverride None
+    Require all granted
+</Directory>
+```
+
+重启 Apache 后，在本机访问：
+
+```text
+http://localhost/pedigree/
+```
+
+在同一局域网的其他电脑访问：
+
+```text
+http://本机局域网IP/pedigree/
+```
+
+例如：
+
+```text
+http://192.168.1.20/pedigree/
+```
+
+注意事项：
+
+- 如果其他电脑打不开，先检查 Windows 防火墙是否允许 Apache 的 80 端口入站。
+- 局域网部署只是共享访问页面，不会自动共享项目数据；每台电脑的编辑数据仍保存在各自浏览器本地。
+- 如需在多台电脑之间传递谱系图，请使用“保存项目”和“加载项目”交换项目文件。
+- 不建议把这个目录直接暴露到公网；临床或家系资料应按本地隐私和数据安全要求保存。
 
 ## 版本管理方式
 
