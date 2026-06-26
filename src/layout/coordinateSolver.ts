@@ -591,7 +591,7 @@ function applyGraphRelationshipConstraints(
 
   const parentDropsChanged = shouldAlignParentDrops ? alignGraphParentDrops(graph, originLinks, layoutPlan) : false;
   const originLinksChanged = shouldAlignOriginLinks ? alignGraphOriginLinks(graph, originLinks, layoutPlan) : false;
-  const siblingOrderChanged = shouldEnforceSiblingOrder ? enforceGraphSiblingBirthOrder(graph, layoutPlan) : false;
+  const siblingOrderChanged = shouldEnforceSiblingOrder ? enforceGraphSiblingBirthOrder(graph, originLinks, layoutPlan) : false;
 
   return {
     parentDropsChanged,
@@ -601,17 +601,38 @@ function applyGraphRelationshipConstraints(
   };
 }
 
-function enforceGraphSiblingBirthOrder(graph: PedigreeGraph, layoutPlan: LayoutPlan) {
+function enforceGraphSiblingBirthOrder(
+  graph: PedigreeGraph,
+  originLinks: OriginLink[],
+  layoutPlan: LayoutPlan
+) {
   let changed = false;
+  const routedMarriageUnionIds = buildRoutedMarriageUnionIds(graph, originLinks);
   for (const siblingGroup of layoutPlan.siblingGroups) {
     const sorted = siblingGroup.orderedChildIds;
     for (let i = 1; i < sorted.length; i++) {
-      const previousBounds = graphSiblingRowBounds(graph, sorted[i - 1], siblingGroup.orderedChildIds, layoutPlan);
-      const currentBounds = graphSiblingRowBounds(graph, sorted[i], siblingGroup.orderedChildIds, layoutPlan);
+      const previousBounds = graphSiblingRowBounds(
+        graph,
+        sorted[i - 1],
+        siblingGroup.orderedChildIds,
+        layoutPlan,
+        routedMarriageUnionIds
+      );
+      const currentBounds = graphSiblingRowBounds(
+        graph,
+        sorted[i],
+        siblingGroup.orderedChildIds,
+        layoutPlan,
+        routedMarriageUnionIds
+      );
       if (!previousBounds || !currentBounds) continue;
       const dx = previousBounds.right + SIBLING_EDGE_GAP - currentBounds.left;
       if (Math.abs(dx) < 0.5) continue;
-      shiftGraphPersons(graph, graphSiblingRowOccupantIds(graph, sorted[i], siblingGroup.orderedChildIds, layoutPlan), dx);
+      shiftGraphPersons(
+        graph,
+        graphSiblingRowOccupantIds(graph, sorted[i], siblingGroup.orderedChildIds, layoutPlan, routedMarriageUnionIds),
+        dx
+      );
       changed = true;
     }
   }
@@ -622,9 +643,10 @@ function graphSiblingRowBounds(
   graph: PedigreeGraph,
   childId: string,
   siblingIds: readonly string[],
-  layoutPlan: LayoutPlan
+  layoutPlan: LayoutPlan,
+  routedMarriageUnionIds: Set<string>
 ) {
-  const xs = [...graphSiblingRowOccupantIds(graph, childId, siblingIds, layoutPlan)]
+  const xs = [...graphSiblingRowOccupantIds(graph, childId, siblingIds, layoutPlan, routedMarriageUnionIds)]
     .map((id) => graph.persons.get(id)?.x)
     .filter((x): x is number => Number.isFinite(x));
   if (xs.length === 0) return undefined;
@@ -638,7 +660,8 @@ function graphSiblingRowOccupantIds(
   graph: PedigreeGraph,
   childId: string,
   siblingIds: readonly string[],
-  layoutPlan: LayoutPlan
+  layoutPlan: LayoutPlan,
+  routedMarriageUnionIds: Set<string>
 ) {
   const ids = new Set([childId]);
   const siblingSet = new Set(siblingIds);
@@ -647,8 +670,7 @@ function graphSiblingRowOccupantIds(
 
   for (const union of graph.unions.values()) {
     if (union.partners.length !== 2 || !union.partners.includes(childId)) continue;
-    if ((graph.childrenMap.get(union.id) ?? []).length === 0) continue;
-    if (marriageRoutesOutsideSiblingRow(graph, union, childId, siblingSet)) continue;
+    if (marriageRoutesOutsideSiblingRow(union, routedMarriageUnionIds)) continue;
     for (const partnerId of union.partners) {
       if (partnerId === childId || siblingSet.has(partnerId)) continue;
       if (belongsToMultiSiblingGroup(layoutPlan, partnerId)) continue;
@@ -661,25 +683,28 @@ function graphSiblingRowOccupantIds(
 }
 
 function marriageRoutesOutsideSiblingRow(
-  graph: PedigreeGraph,
   union: { id: string; partners: readonly string[] },
-  childId: string,
-  siblingSet: Set<string>
+  routedMarriageUnionIds: Set<string>
 ) {
-  const partnerId = union.partners.find((id) => id !== childId);
-  if (!partnerId) return false;
+  return routedMarriageUnionIds.has(union.id);
+}
 
-  const child = graph.persons.get(childId);
-  const partner = graph.persons.get(partnerId);
-  if (!child || !partner) return false;
-  if ((child.generation ?? 0) !== (partner.generation ?? 0)) return false;
-  if (!Number.isFinite(child.x) || !Number.isFinite(partner.x)) return false;
+function buildRoutedMarriageUnionIds(graph: PedigreeGraph, originLinks: OriginLink[]) {
+  const routed = new Set<string>();
+  for (const link of originLinks) {
+    if (!directOriginMarriageRouteWouldConflict(graph, link)) continue;
+    const union = unionForPartners(graph, link.couple.members);
+    if (union) routed.add(union.id);
+  }
+  return routed;
+}
 
-  const parentUnionByChild = buildGraphParentUnionByChild(graph);
-  const partnerOriginUnionId = parentUnionByChild.get(partnerId);
-  if (partnerOriginUnionId) return true;
-
-  return hasSameGenerationSiblingBetween(graph, childId, partnerId, siblingSet);
+function unionForPartners(graph: PedigreeGraph, partnerIds: readonly string[]) {
+  const partnerSet = new Set(partnerIds);
+  return [...graph.unions.values()].find((union) =>
+    union.partners.length === partnerSet.size &&
+    union.partners.every((id) => partnerSet.has(id))
+  );
 }
 
 function hasSameGenerationSiblingBetween(
@@ -1233,7 +1258,7 @@ function compactWideGraphCoordinates(graph: PedigreeGraph, layoutPlan: LayoutPla
   if (people.length === 0) return;
   const minX = Math.min(...people.map((person) => person.x ?? 0));
   const maxX = Math.max(...people.map((person) => person.x ?? 0));
-  if (maxX - minX <= 30 * PERSON_GAP) return;
+  if (maxX - minX <= 24 * PERSON_GAP) return;
 
   const byGeneration = new Map<number, string[]>();
   for (const person of people) {

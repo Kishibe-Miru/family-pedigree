@@ -1619,7 +1619,7 @@
     const shouldEnforceSiblingOrder = options.enforceSiblingOrder ?? true;
     const parentDropsChanged = shouldAlignParentDrops ? alignGraphParentDrops(graph, originLinks, layoutPlan) : false;
     const originLinksChanged = shouldAlignOriginLinks ? alignGraphOriginLinks(graph, originLinks, layoutPlan) : false;
-    const siblingOrderChanged = shouldEnforceSiblingOrder ? enforceGraphSiblingBirthOrder(graph, layoutPlan) : false;
+    const siblingOrderChanged = shouldEnforceSiblingOrder ? enforceGraphSiblingBirthOrder(graph, originLinks, layoutPlan) : false;
     return {
       parentDropsChanged,
       originLinksChanged,
@@ -1627,39 +1627,55 @@
       changed: parentDropsChanged || originLinksChanged || siblingOrderChanged
     };
   }
-  function enforceGraphSiblingBirthOrder(graph, layoutPlan) {
+  function enforceGraphSiblingBirthOrder(graph, originLinks, layoutPlan) {
     let changed = false;
+    const routedMarriageUnionIds = buildRoutedMarriageUnionIds(graph, originLinks);
     for (const siblingGroup of layoutPlan.siblingGroups) {
       const sorted = siblingGroup.orderedChildIds;
       for (let i = 1; i < sorted.length; i++) {
-        const previousBounds = graphSiblingRowBounds(graph, sorted[i - 1], siblingGroup.orderedChildIds, layoutPlan);
-        const currentBounds = graphSiblingRowBounds(graph, sorted[i], siblingGroup.orderedChildIds, layoutPlan);
+        const previousBounds = graphSiblingRowBounds(
+          graph,
+          sorted[i - 1],
+          siblingGroup.orderedChildIds,
+          layoutPlan,
+          routedMarriageUnionIds
+        );
+        const currentBounds = graphSiblingRowBounds(
+          graph,
+          sorted[i],
+          siblingGroup.orderedChildIds,
+          layoutPlan,
+          routedMarriageUnionIds
+        );
         if (!previousBounds || !currentBounds) continue;
         const dx = previousBounds.right + SIBLING_EDGE_GAP - currentBounds.left;
         if (Math.abs(dx) < 0.5) continue;
-        shiftGraphPersons(graph, graphSiblingRowOccupantIds(graph, sorted[i], siblingGroup.orderedChildIds, layoutPlan), dx);
+        shiftGraphPersons(
+          graph,
+          graphSiblingRowOccupantIds(graph, sorted[i], siblingGroup.orderedChildIds, layoutPlan, routedMarriageUnionIds),
+          dx
+        );
         changed = true;
       }
     }
     return changed;
   }
-  function graphSiblingRowBounds(graph, childId, siblingIds, layoutPlan) {
-    const xs = [...graphSiblingRowOccupantIds(graph, childId, siblingIds, layoutPlan)].map((id) => graph.persons.get(id)?.x).filter((x) => Number.isFinite(x));
+  function graphSiblingRowBounds(graph, childId, siblingIds, layoutPlan, routedMarriageUnionIds) {
+    const xs = [...graphSiblingRowOccupantIds(graph, childId, siblingIds, layoutPlan, routedMarriageUnionIds)].map((id) => graph.persons.get(id)?.x).filter((x) => Number.isFinite(x));
     if (xs.length === 0) return void 0;
     return {
       left: Math.min(...xs) - NODE_SIZE / 2,
       right: Math.max(...xs) + NODE_SIZE / 2
     };
   }
-  function graphSiblingRowOccupantIds(graph, childId, siblingIds, layoutPlan) {
+  function graphSiblingRowOccupantIds(graph, childId, siblingIds, layoutPlan, routedMarriageUnionIds) {
     const ids = /* @__PURE__ */ new Set([childId]);
     const siblingSet = new Set(siblingIds);
     const child = graph.persons.get(childId);
     if (!child) return ids;
     for (const union of graph.unions.values()) {
       if (union.partners.length !== 2 || !union.partners.includes(childId)) continue;
-      if ((graph.childrenMap.get(union.id) ?? []).length === 0) continue;
-      if (marriageRoutesOutsideSiblingRow(graph, union, childId, siblingSet)) continue;
+      if (marriageRoutesOutsideSiblingRow(union, routedMarriageUnionIds)) continue;
       for (const partnerId of union.partners) {
         if (partnerId === childId || siblingSet.has(partnerId)) continue;
         if (belongsToMultiSiblingGroup(layoutPlan, partnerId)) continue;
@@ -1670,18 +1686,23 @@
     }
     return ids;
   }
-  function marriageRoutesOutsideSiblingRow(graph, union, childId, siblingSet) {
-    const partnerId = union.partners.find((id) => id !== childId);
-    if (!partnerId) return false;
-    const child = graph.persons.get(childId);
-    const partner = graph.persons.get(partnerId);
-    if (!child || !partner) return false;
-    if ((child.generation ?? 0) !== (partner.generation ?? 0)) return false;
-    if (!Number.isFinite(child.x) || !Number.isFinite(partner.x)) return false;
-    const parentUnionByChild = buildGraphParentUnionByChild(graph);
-    const partnerOriginUnionId = parentUnionByChild.get(partnerId);
-    if (partnerOriginUnionId) return true;
-    return hasSameGenerationSiblingBetween(graph, childId, partnerId, siblingSet);
+  function marriageRoutesOutsideSiblingRow(union, routedMarriageUnionIds) {
+    return routedMarriageUnionIds.has(union.id);
+  }
+  function buildRoutedMarriageUnionIds(graph, originLinks) {
+    const routed = /* @__PURE__ */ new Set();
+    for (const link of originLinks) {
+      if (!directOriginMarriageRouteWouldConflict(graph, link)) continue;
+      const union = unionForPartners(graph, link.couple.members);
+      if (union) routed.add(union.id);
+    }
+    return routed;
+  }
+  function unionForPartners(graph, partnerIds) {
+    const partnerSet = new Set(partnerIds);
+    return [...graph.unions.values()].find(
+      (union) => union.partners.length === partnerSet.size && union.partners.every((id) => partnerSet.has(id))
+    );
   }
   function hasSameGenerationSiblingBetween(graph, childId, partnerId, siblingSet) {
     const child = graph.persons.get(childId);
@@ -2119,7 +2140,7 @@
     if (people.length === 0) return;
     const minX = Math.min(...people.map((person) => person.x ?? 0));
     const maxX = Math.max(...people.map((person) => person.x ?? 0));
-    if (maxX - minX <= 30 * PERSON_GAP) return;
+    if (maxX - minX <= 24 * PERSON_GAP) return;
     const byGeneration = /* @__PURE__ */ new Map();
     for (const person of people) {
       const generation = person.generation ?? 0;

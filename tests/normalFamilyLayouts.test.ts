@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { layout } from "../src/browser/entry";
-import { BASE_MARRIAGE_GAP, BRANCHED_MARRIAGE_GAP, DUAL_ORIGIN_MARRIAGE_GAP, GENERATION_GAP, NODE_SIZE } from "../src/layout/boxModel";
+import { BASE_MARRIAGE_GAP, BRANCHED_MARRIAGE_GAP, DUAL_ORIGIN_MARRIAGE_GAP, GENERATION_GAP, NODE_SIZE, PERSON_GAP } from "../src/layout/boxModel";
 import { LayoutInput, LayoutResult } from "../src/model/layoutResult";
 import {
   assertChildHasVerticalSegmentToNode,
@@ -443,6 +443,53 @@ test("normal married child without children remains a compact spouse union", () 
   const spouse = findNode(result, "spouse");
   assert.ok(Math.abs(Math.abs(child.x - spouse.x) - BRANCHED_MARRIAGE_GAP) < 0.5);
   assert.equal(result.relationshipSegments.some((segment) => segment.unionId === "marriage" && segment.kind === "parent-drop"), false);
+});
+
+test("normal local spouse of an origin sibling stays adjacent by couple order", () => {
+  const result = buildLayout({
+    persons: [
+      { id: "father", sex: "M" },
+      { id: "mother", sex: "F" },
+      { id: "proband", sex: "M", birthOrder: 1 },
+      { id: "brother1", sex: "M", birthOrder: 0 },
+      { id: "brother2", sex: "M", birthOrder: 2 },
+      { id: "brother3", sex: "M", birthOrder: 3 },
+      { id: "spouseFather", sex: "M" },
+      { id: "spouseMother", sex: "F" },
+      { id: "spouse", sex: "F", birthOrder: 0 },
+      { id: "spouseSister", sex: "F", birthOrder: 1 },
+      { id: "sisterHusband", sex: "M" },
+      { id: "son", sex: "M", birthOrder: 0 },
+      { id: "daughter", sex: "F", birthOrder: 1 },
+      { id: "sisterSon", sex: "M", birthOrder: 0 }
+    ],
+    unions: [
+      { id: "sourceParents", partners: ["father", "mother"] },
+      { id: "spouseParents", partners: ["spouseFather", "spouseMother"] },
+      { id: "probandMarriage", partners: ["proband", "spouse"] },
+      { id: "sisterMarriage", partners: ["sisterHusband", "spouseSister"] }
+    ],
+    childrenMap: [
+      ["sourceParents", ["brother1", "proband", "brother2", "brother3"]],
+      ["spouseParents", ["spouse", "spouseSister"]],
+      ["probandMarriage", ["son", "daughter"]],
+      ["sisterMarriage", ["sisterSon"]]
+    ]
+  });
+
+  assertNoNodeOverlaps(result);
+  assertMarriageSegmentConnects(result, "spouseSister", "sisterHusband");
+
+  const spouse = findNode(result, "spouse");
+  const spouseSister = findNode(result, "spouseSister");
+  const sisterHusband = findNode(result, "sisterHusband");
+  const sisterMarriage = result.relationshipSegments.find((segment) =>
+    segment.unionId === "sisterMarriage" && segment.kind === "marriage"
+  );
+
+  assert.ok(sisterHusband.x < spouseSister.x);
+  assert.ok(sisterHusband.x - spouse.x >= PERSON_GAP - 0.5);
+  assert.equal(sisterMarriage?.points.length, 2);
 });
 
 test("normal marriage between two origin-family children separates first-generation parents", () => {
