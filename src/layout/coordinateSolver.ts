@@ -263,6 +263,18 @@ function assertFamilyAnchors(box: Box, expectedDropX: number) {
 }
 
 export function assignCoordinates(graph: PedigreeGraph) {
+  const state = initializeCoordinateLayout(graph);
+  relaxCoordinateLayout(state);
+  stabilizeCoordinateLayout(graph, state);
+  writeBackCoordinates(graph, state.boxes, state.originLinks);
+  finalizeGraphCoordinates(graph, state.originLinks, state.layoutPlan);
+  normalizeGraphToOrigin(graph);
+  assertLayoutInvariants(graph, state.originLinks);
+
+  return graph;
+}
+
+function initializeCoordinateLayout(graph: PedigreeGraph): CoordinateLayoutState {
   let nextX = 0;
   const { roots: boxes, originLinks } = buildForest(graph);
   const layoutPlan = buildLayoutPlan(graph);
@@ -276,56 +288,151 @@ export function assignCoordinates(graph: PedigreeGraph) {
   }
   const originContext = buildOriginLayoutContext(boxes, originLinks);
   resolveGenerationOverlaps(boxes);
-  for (let i = 0; i < 160; i++) {
-    const originChanged = reconcileOrigins(boxes, originLinks);
-    if (originChanged) realignFamilyTops(boxes);
-    const symbolChanged = resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
-    const compacted = compactPersonGaps(boxes, originContext, generationOrder);
-    const siblingCompacted = compactSiblingRows(boxes, originLinks, originContext, layoutPlan);
-    if (!originChanged && !symbolChanged && !compacted && !siblingCompacted) break;
-  }
-  compactWideSiblingRows(boxes, originContext, layoutPlan);
-  reconcileOrigins(boxes, originLinks);
-  resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
-  if (generationOrder) enforceGenerationOrder(boxes, originLinks, originContext, generationOrder);
-  reconcileOrigins(boxes, originLinks);
-  resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
-  if (generationOrder) enforceGenerationOrder(boxes, originLinks, originContext, generationOrder);
-  reconcileOrigins(boxes, originLinks);
-  resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
-  resolveActualSymbolOverlaps(boxes, originLinks, originContext);
-  finalizeLayoutConstraints(graph, boxes, originLinks, originContext, layoutPlan);
-  writeBackCoordinates(graph, boxes, originLinks);
-  finalizeGraphCoordinates(graph, originLinks, layoutPlan);
-  normalizeGraphToOrigin(graph);
-  assertLayoutInvariants(graph, originLinks);
 
-  return graph;
+  return { boxes, originLinks, originContext, layoutPlan, generationOrder };
+}
+
+function relaxCoordinateLayout(state: CoordinateLayoutState) {
+  for (let i = 0; i < 160; i++) {
+    if (!runCoordinateRelaxationPass(state)) break;
+  }
+  settleRelaxedCoordinateLayout(state);
+}
+
+function runCoordinateRelaxationPass(state: CoordinateLayoutState) {
+  const { boxes, originLinks, originContext, layoutPlan, generationOrder } = state;
+  const originChanged = reconcileOrigins(boxes, originLinks);
+  if (originChanged) realignFamilyTops(boxes);
+  const symbolChanged = resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
+  const compacted = compactPersonGaps(boxes, originContext, generationOrder);
+  const siblingCompacted = compactSiblingRows(boxes, originLinks, originContext, layoutPlan);
+  return originChanged || symbolChanged || compacted || siblingCompacted;
+}
+
+function settleRelaxedCoordinateLayout(state: CoordinateLayoutState) {
+  const { boxes, originContext, layoutPlan } = state;
+  compactWideSiblingRows(boxes, originContext, layoutPlan);
+  reconcileSymbolsAndOrdering(state);
+  reconcileSymbolsAndOrdering(state);
+  reconcileSymbolsAndOrdering(state, { enforceOrder: false });
+  resolveActualSymbolOverlaps(state.boxes, state.originLinks, state.originContext);
+}
+
+function reconcileSymbolsAndOrdering(
+  state: CoordinateLayoutState,
+  options: { enforceOrder?: boolean } = {}
+) {
+  const { boxes, originLinks, originContext, generationOrder } = state;
+  const shouldEnforceOrder = options.enforceOrder ?? true;
+  reconcileOrigins(boxes, originLinks);
+  resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
+  if (shouldEnforceOrder && generationOrder) {
+    enforceGenerationOrder(boxes, originLinks, originContext, generationOrder);
+  }
+}
+
+function stabilizeCoordinateLayout(graph: PedigreeGraph, state: CoordinateLayoutState) {
+  finalizeLayoutConstraints(graph, state.boxes, state.originLinks, state.originContext, state.layoutPlan);
 }
 
 function finalizeGraphCoordinates(graph: PedigreeGraph, originLinks: OriginLink[], layoutPlan: LayoutPlan) {
   compactWideGraphCoordinates(graph, layoutPlan);
+  iterateGraphRelationshipAlignment(graph, originLinks, layoutPlan);
+  settleFinalGraphCoordinateRepairs(graph, originLinks, layoutPlan);
+}
+
+function iterateGraphRelationshipAlignment(
+  graph: PedigreeGraph,
+  originLinks: OriginLink[],
+  layoutPlan: LayoutPlan
+) {
   for (let i = 0; i < 24; i++) {
-    alignGraphParentDrops(graph, originLinks, layoutPlan);
-    alignGraphOriginLinks(graph, originLinks, layoutPlan);
-    const siblingChanged = enforceGraphSiblingBirthOrder(graph, layoutPlan);
-    alignGraphOriginMarriagesSafely(graph, originLinks);
-    const overlapChanged = repairGraphOriginOverlaps(graph, originLinks);
-    if (!siblingChanged && !overlapChanged) break;
+    if (!runGraphRelationshipAlignmentPass(graph, originLinks, layoutPlan)) break;
   }
-  alignGraphParentDrops(graph, originLinks, layoutPlan);
-  alignGraphOriginLinks(graph, originLinks, layoutPlan);
-  enforceGraphSiblingBirthOrder(graph, layoutPlan);
+}
+
+function runGraphRelationshipAlignmentPass(
+  graph: PedigreeGraph,
+  originLinks: OriginLink[],
+  layoutPlan: LayoutPlan
+) {
+  const relationshipResult = applyGraphRelationshipConstraints(graph, originLinks, layoutPlan);
+  alignGraphOriginMarriagesSafely(graph, originLinks);
+  const overlapChanged = repairGraphOriginOverlaps(graph, originLinks);
+  return relationshipResult.changed || overlapChanged;
+}
+
+function settleFinalGraphCoordinateRepairs(
+  graph: PedigreeGraph,
+  originLinks: OriginLink[],
+  layoutPlan: LayoutPlan
+) {
+  settleGraphRelationshipConstraints(graph, originLinks, layoutPlan);
   repairGraphOriginOverlaps(graph, originLinks);
-  enforceGraphSiblingBirthOrder(graph, layoutPlan);
-  alignGraphParentDrops(graph, originLinks, layoutPlan);
+  settleGraphParentAndSiblingConstraints(graph, originLinks, layoutPlan);
   repairGraphSymbolOverlaps(graph);
-  alignGraphOriginLinks(graph, originLinks, layoutPlan);
-  enforceGraphSiblingBirthOrder(graph, layoutPlan);
-  alignGraphParentDrops(graph, originLinks, layoutPlan);
+  settleGraphOriginAndSiblingConstraints(graph, originLinks, layoutPlan);
+  settleGraphParentDropConstraints(graph, originLinks, layoutPlan);
   repairGraphSymbolOverlaps(graph);
   alignGraphOriginMarriagesSafely(graph, originLinks);
   repairGraphSymbolOverlaps(graph);
+}
+
+function settleGraphRelationshipConstraints(
+  graph: PedigreeGraph,
+  originLinks: OriginLink[],
+  layoutPlan: LayoutPlan
+) {
+  applyGraphRelationshipConstraints(graph, originLinks, layoutPlan);
+}
+
+function settleGraphParentAndSiblingConstraints(
+  graph: PedigreeGraph,
+  originLinks: OriginLink[],
+  layoutPlan: LayoutPlan
+) {
+  applyGraphRelationshipConstraints(graph, originLinks, layoutPlan, { alignOriginLinks: false });
+}
+
+function settleGraphOriginAndSiblingConstraints(
+  graph: PedigreeGraph,
+  originLinks: OriginLink[],
+  layoutPlan: LayoutPlan
+) {
+  applyGraphRelationshipConstraints(graph, originLinks, layoutPlan, { alignParentDrops: false });
+}
+
+function settleGraphParentDropConstraints(
+  graph: PedigreeGraph,
+  originLinks: OriginLink[],
+  layoutPlan: LayoutPlan
+) {
+  applyGraphRelationshipConstraints(graph, originLinks, layoutPlan, {
+    alignOriginLinks: false,
+    enforceSiblingOrder: false
+  });
+}
+
+function applyGraphRelationshipConstraints(
+  graph: PedigreeGraph,
+  originLinks: OriginLink[],
+  layoutPlan: LayoutPlan,
+  options: GraphRelationshipConstraintOptions = {}
+) {
+  const shouldAlignParentDrops = options.alignParentDrops ?? true;
+  const shouldAlignOriginLinks = options.alignOriginLinks ?? true;
+  const shouldEnforceSiblingOrder = options.enforceSiblingOrder ?? true;
+
+  const parentDropsChanged = shouldAlignParentDrops ? alignGraphParentDrops(graph, originLinks, layoutPlan) : false;
+  const originLinksChanged = shouldAlignOriginLinks ? alignGraphOriginLinks(graph, originLinks, layoutPlan) : false;
+  const siblingOrderChanged = shouldEnforceSiblingOrder ? enforceGraphSiblingBirthOrder(graph, layoutPlan) : false;
+
+  return {
+    parentDropsChanged,
+    originLinksChanged,
+    siblingOrderChanged,
+    changed: parentDropsChanged || originLinksChanged || siblingOrderChanged
+  };
 }
 
 function enforceGraphSiblingBirthOrder(graph: PedigreeGraph, layoutPlan: LayoutPlan) {
@@ -366,6 +473,7 @@ function repairGraphSymbolOverlaps(graph: PedigreeGraph) {
 }
 
 function alignGraphParentDrops(graph: PedigreeGraph, originLinks: OriginLink[] = [], layoutPlan?: LayoutPlan) {
+  let changed = false;
   const originChildByParentUnion = new Map<string, string>();
   if (layoutPlan) {
     const sharedOriginPeople = new Set(originLinks.map((link) => link.sharedPersonId));
@@ -428,6 +536,7 @@ function alignGraphParentDrops(graph: PedigreeGraph, originLinks: OriginLink[] =
             const child = graph.persons.get(childId);
             if (child && Number.isFinite(child.x)) child.x = (child.x ?? 0) + dx;
           }
+          changed = true;
         }
         continue;
       }
@@ -442,6 +551,7 @@ function alignGraphParentDrops(graph: PedigreeGraph, originLinks: OriginLink[] =
           const child = graph.persons.get(childId);
           if (child && Number.isFinite(child.x)) child.x = (child.x ?? 0) + dx;
         }
+        changed = true;
         continue;
       }
 
@@ -458,6 +568,7 @@ function alignGraphParentDrops(graph: PedigreeGraph, originLinks: OriginLink[] =
           const child = graph.persons.get(childId);
           if (child && Number.isFinite(child.x)) child.x = (child.x ?? 0) + dx;
         }
+        changed = true;
         continue;
       }
 
@@ -471,7 +582,10 @@ function alignGraphParentDrops(graph: PedigreeGraph, originLinks: OriginLink[] =
       const partner = graph.persons.get(partnerId);
       if (partner && Number.isFinite(partner.x)) partner.x = (partner.x ?? 0) + dx;
     }
+    changed = true;
   }
+
+  return changed;
 }
 
 function computeParentCenter(graph: PedigreeGraph, partnerIds: readonly string[]): number {
@@ -482,6 +596,7 @@ function computeParentCenter(graph: PedigreeGraph, partnerIds: readonly string[]
 }
 
 function alignGraphOriginLinks(graph: PedigreeGraph, originLinks: OriginLink[], layoutPlan: LayoutPlan) {
+  let changed = false;
   const originUnionBySharedPerson = new Map(
     layoutPlan.originSeparations.map((separation) => [separation.sharedPersonId, separation.originUnionId])
   );
@@ -508,7 +623,10 @@ function alignGraphOriginLinks(graph: PedigreeGraph, originLinks: OriginLink[], 
       const person = graph.persons.get(id);
       if (person && Number.isFinite(person.x)) person.x = (person.x ?? 0) + dx;
     }
+    changed = true;
   }
+
+  return changed;
 }
 
 function alignGraphOriginMarriagesSafely(graph: PedigreeGraph, originLinks: OriginLink[]) {
@@ -1205,6 +1323,27 @@ interface OriginLayoutContext {
   pinnedMovers: Set<Box>;
   originBundleByRoot: Map<Box, Box>;
   originRootByCoreFamily: Map<Box, Box>;
+}
+
+interface CoordinateLayoutState {
+  boxes: Box[];
+  originLinks: OriginLink[];
+  originContext: OriginLayoutContext;
+  layoutPlan: LayoutPlan;
+  generationOrder?: GenerationOrder;
+}
+
+interface GraphRelationshipConstraintOptions {
+  alignParentDrops?: boolean;
+  alignOriginLinks?: boolean;
+  enforceSiblingOrder?: boolean;
+}
+
+interface GraphRelationshipConstraintResult {
+  parentDropsChanged: boolean;
+  originLinksChanged: boolean;
+  siblingOrderChanged: boolean;
+  changed: boolean;
 }
 
 interface PersonEntry {

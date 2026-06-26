@@ -1346,6 +1346,16 @@
     }
   }
   function assignCoordinates(graph) {
+    const state = initializeCoordinateLayout(graph);
+    relaxCoordinateLayout(state);
+    stabilizeCoordinateLayout(graph, state);
+    writeBackCoordinates(graph, state.boxes, state.originLinks);
+    finalizeGraphCoordinates(graph, state.originLinks, state.layoutPlan);
+    normalizeGraphToOrigin(graph);
+    assertLayoutInvariants(graph, state.originLinks);
+    return graph;
+  }
+  function initializeCoordinateLayout(graph) {
     let nextX = 0;
     const { roots: boxes, originLinks } = buildForest(graph);
     const layoutPlan = buildLayoutPlan(graph);
@@ -1358,54 +1368,98 @@
     }
     const originContext = buildOriginLayoutContext(boxes, originLinks);
     resolveGenerationOverlaps(boxes);
+    return { boxes, originLinks, originContext, layoutPlan, generationOrder };
+  }
+  function relaxCoordinateLayout(state) {
     for (let i = 0; i < 160; i++) {
-      const originChanged = reconcileOrigins(boxes, originLinks);
-      if (originChanged) realignFamilyTops(boxes);
-      const symbolChanged = resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
-      const compacted = compactPersonGaps(boxes, originContext, generationOrder);
-      const siblingCompacted = compactSiblingRows(boxes, originLinks, originContext, layoutPlan);
-      if (!originChanged && !symbolChanged && !compacted && !siblingCompacted) break;
+      if (!runCoordinateRelaxationPass(state)) break;
     }
+    settleRelaxedCoordinateLayout(state);
+  }
+  function runCoordinateRelaxationPass(state) {
+    const { boxes, originLinks, originContext, layoutPlan, generationOrder } = state;
+    const originChanged = reconcileOrigins(boxes, originLinks);
+    if (originChanged) realignFamilyTops(boxes);
+    const symbolChanged = resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
+    const compacted = compactPersonGaps(boxes, originContext, generationOrder);
+    const siblingCompacted = compactSiblingRows(boxes, originLinks, originContext, layoutPlan);
+    return originChanged || symbolChanged || compacted || siblingCompacted;
+  }
+  function settleRelaxedCoordinateLayout(state) {
+    const { boxes, originContext, layoutPlan } = state;
     compactWideSiblingRows(boxes, originContext, layoutPlan);
+    reconcileSymbolsAndOrdering(state);
+    reconcileSymbolsAndOrdering(state);
+    reconcileSymbolsAndOrdering(state, { enforceOrder: false });
+    resolveActualSymbolOverlaps(state.boxes, state.originLinks, state.originContext);
+  }
+  function reconcileSymbolsAndOrdering(state, options = {}) {
+    const { boxes, originLinks, originContext, generationOrder } = state;
+    const shouldEnforceOrder = options.enforceOrder ?? true;
     reconcileOrigins(boxes, originLinks);
     resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
-    if (generationOrder) enforceGenerationOrder(boxes, originLinks, originContext, generationOrder);
-    reconcileOrigins(boxes, originLinks);
-    resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
-    if (generationOrder) enforceGenerationOrder(boxes, originLinks, originContext, generationOrder);
-    reconcileOrigins(boxes, originLinks);
-    resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
-    resolveActualSymbolOverlaps(boxes, originLinks, originContext);
-    finalizeLayoutConstraints(graph, boxes, originLinks, originContext, layoutPlan);
-    writeBackCoordinates(graph, boxes, originLinks);
-    finalizeGraphCoordinates(graph, originLinks, layoutPlan);
-    normalizeGraphToOrigin(graph);
-    assertLayoutInvariants(graph, originLinks);
-    return graph;
+    if (shouldEnforceOrder && generationOrder) {
+      enforceGenerationOrder(boxes, originLinks, originContext, generationOrder);
+    }
+  }
+  function stabilizeCoordinateLayout(graph, state) {
+    finalizeLayoutConstraints(graph, state.boxes, state.originLinks, state.originContext, state.layoutPlan);
   }
   function finalizeGraphCoordinates(graph, originLinks, layoutPlan) {
     compactWideGraphCoordinates(graph, layoutPlan);
+    iterateGraphRelationshipAlignment(graph, originLinks, layoutPlan);
+    settleFinalGraphCoordinateRepairs(graph, originLinks, layoutPlan);
+  }
+  function iterateGraphRelationshipAlignment(graph, originLinks, layoutPlan) {
     for (let i = 0; i < 24; i++) {
-      alignGraphParentDrops(graph, originLinks, layoutPlan);
-      alignGraphOriginLinks(graph, originLinks, layoutPlan);
-      const siblingChanged = enforceGraphSiblingBirthOrder(graph, layoutPlan);
-      alignGraphOriginMarriagesSafely(graph, originLinks);
-      const overlapChanged = repairGraphOriginOverlaps(graph, originLinks);
-      if (!siblingChanged && !overlapChanged) break;
+      if (!runGraphRelationshipAlignmentPass(graph, originLinks, layoutPlan)) break;
     }
-    alignGraphParentDrops(graph, originLinks, layoutPlan);
-    alignGraphOriginLinks(graph, originLinks, layoutPlan);
-    enforceGraphSiblingBirthOrder(graph, layoutPlan);
+  }
+  function runGraphRelationshipAlignmentPass(graph, originLinks, layoutPlan) {
+    const relationshipResult = applyGraphRelationshipConstraints(graph, originLinks, layoutPlan);
+    alignGraphOriginMarriagesSafely(graph, originLinks);
+    const overlapChanged = repairGraphOriginOverlaps(graph, originLinks);
+    return relationshipResult.changed || overlapChanged;
+  }
+  function settleFinalGraphCoordinateRepairs(graph, originLinks, layoutPlan) {
+    settleGraphRelationshipConstraints(graph, originLinks, layoutPlan);
     repairGraphOriginOverlaps(graph, originLinks);
-    enforceGraphSiblingBirthOrder(graph, layoutPlan);
-    alignGraphParentDrops(graph, originLinks, layoutPlan);
+    settleGraphParentAndSiblingConstraints(graph, originLinks, layoutPlan);
     repairGraphSymbolOverlaps(graph);
-    alignGraphOriginLinks(graph, originLinks, layoutPlan);
-    enforceGraphSiblingBirthOrder(graph, layoutPlan);
-    alignGraphParentDrops(graph, originLinks, layoutPlan);
+    settleGraphOriginAndSiblingConstraints(graph, originLinks, layoutPlan);
+    settleGraphParentDropConstraints(graph, originLinks, layoutPlan);
     repairGraphSymbolOverlaps(graph);
     alignGraphOriginMarriagesSafely(graph, originLinks);
     repairGraphSymbolOverlaps(graph);
+  }
+  function settleGraphRelationshipConstraints(graph, originLinks, layoutPlan) {
+    applyGraphRelationshipConstraints(graph, originLinks, layoutPlan);
+  }
+  function settleGraphParentAndSiblingConstraints(graph, originLinks, layoutPlan) {
+    applyGraphRelationshipConstraints(graph, originLinks, layoutPlan, { alignOriginLinks: false });
+  }
+  function settleGraphOriginAndSiblingConstraints(graph, originLinks, layoutPlan) {
+    applyGraphRelationshipConstraints(graph, originLinks, layoutPlan, { alignParentDrops: false });
+  }
+  function settleGraphParentDropConstraints(graph, originLinks, layoutPlan) {
+    applyGraphRelationshipConstraints(graph, originLinks, layoutPlan, {
+      alignOriginLinks: false,
+      enforceSiblingOrder: false
+    });
+  }
+  function applyGraphRelationshipConstraints(graph, originLinks, layoutPlan, options = {}) {
+    const shouldAlignParentDrops = options.alignParentDrops ?? true;
+    const shouldAlignOriginLinks = options.alignOriginLinks ?? true;
+    const shouldEnforceSiblingOrder = options.enforceSiblingOrder ?? true;
+    const parentDropsChanged = shouldAlignParentDrops ? alignGraphParentDrops(graph, originLinks, layoutPlan) : false;
+    const originLinksChanged = shouldAlignOriginLinks ? alignGraphOriginLinks(graph, originLinks, layoutPlan) : false;
+    const siblingOrderChanged = shouldEnforceSiblingOrder ? enforceGraphSiblingBirthOrder(graph, layoutPlan) : false;
+    return {
+      parentDropsChanged,
+      originLinksChanged,
+      siblingOrderChanged,
+      changed: parentDropsChanged || originLinksChanged || siblingOrderChanged
+    };
   }
   function enforceGraphSiblingBirthOrder(graph, layoutPlan) {
     let changed = false;
@@ -1441,6 +1495,7 @@
     }
   }
   function alignGraphParentDrops(graph, originLinks = [], layoutPlan) {
+    let changed = false;
     const originChildByParentUnion = /* @__PURE__ */ new Map();
     if (layoutPlan) {
       const sharedOriginPeople = new Set(originLinks.map((link) => link.sharedPersonId));
@@ -1491,6 +1546,7 @@
               const child = graph.persons.get(childId);
               if (child && Number.isFinite(child.x)) child.x = (child.x ?? 0) + dx2;
             }
+            changed = true;
           }
           continue;
         }
@@ -1505,6 +1561,7 @@
             const child = graph.persons.get(childId);
             if (child && Number.isFinite(child.x)) child.x = (child.x ?? 0) + dx2;
           }
+          changed = true;
           continue;
         }
         const leftShared = (childbearingUnionCount.get(leftId) ?? 0) > 1;
@@ -1520,6 +1577,7 @@
             const child = graph.persons.get(childId);
             if (child && Number.isFinite(child.x)) child.x = (child.x ?? 0) + dx2;
           }
+          changed = true;
           continue;
         }
       }
@@ -1530,13 +1588,16 @@
         const partner = graph.persons.get(partnerId);
         if (partner && Number.isFinite(partner.x)) partner.x = (partner.x ?? 0) + dx;
       }
+      changed = true;
     }
+    return changed;
   }
   function computeParentCenter(graph, partnerIds) {
     const xs = partnerIds.map((partnerId) => graph.persons.get(partnerId)?.x).filter((x) => Number.isFinite(x));
     return xs.reduce((sum, x) => sum + x, 0) / xs.length;
   }
   function alignGraphOriginLinks(graph, originLinks, layoutPlan) {
+    let changed = false;
     const originUnionBySharedPerson = new Map(
       layoutPlan.originSeparations.map((separation) => [separation.sharedPersonId, separation.originUnionId])
     );
@@ -1558,7 +1619,9 @@
         const person = graph.persons.get(id);
         if (person && Number.isFinite(person.x)) person.x = (person.x ?? 0) + dx;
       }
+      changed = true;
     }
+    return changed;
   }
   function alignGraphOriginMarriagesSafely(graph, originLinks) {
     for (const link of originLinks) {
