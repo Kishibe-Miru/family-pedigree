@@ -365,7 +365,9 @@
   var NODE_SIZE = 44;
   var PERSON_GAP = NODE_SIZE * 2.7;
   var SLOT = PERSON_GAP;
-  var MARRIAGE_GAP = NODE_SIZE * 1.6;
+  var BASE_MARRIAGE_GAP = NODE_SIZE * 2.1;
+  var BRANCHED_MARRIAGE_GAP = NODE_SIZE * 2.25;
+  var MARRIAGE_GAP = BRANCHED_MARRIAGE_GAP;
   var SIBLING_GAP = PERSON_GAP;
   var MIN_GAP = NODE_SIZE * 0.8;
   var GENERATION_GAP = NODE_SIZE * 3.7;
@@ -385,20 +387,21 @@
       }
     };
   }
-  function createCoupleBox(partnerIds, generation, mainPersonId, originOf) {
+  function createCoupleBox(partnerIds, generation, mainPersonId, originOf, marriageGap = BASE_MARRIAGE_GAP) {
     const [leftId, rightId] = partnerIds;
     const offsets = /* @__PURE__ */ new Map();
-    const partnerOffset = MARRIAGE_GAP / 2;
+    const partnerOffset = marriageGap / 2;
     if (leftId) offsets.set(leftId, partnerIds.length === 1 ? 0 : -partnerOffset);
     if (rightId) offsets.set(rightId, partnerOffset);
     return {
       kind: "couple",
-      width: Math.max(SLOT * partnerIds.length, MARRIAGE_GAP + SLOT),
+      width: Math.max(SLOT * partnerIds.length, marriageGap + SLOT),
       cx: 0,
       gen: generation,
       members: [...partnerIds],
       mainPersonId,
       originOf,
+      marriageGap,
       anchorX(id) {
         return this.cx + (offsets.get(id) ?? 0);
       },
@@ -784,7 +787,8 @@
       const originOf = mainPersonId ? union.partners.find((partnerId) => partnerId !== mainPersonId && hasParents(partnerId)) : void 0;
       const mainId = mainPersonId ?? union.partners.find((partnerId) => !hasParents(partnerId)) ?? union.partners[0];
       const partners = orderPartnersForMain(graph, parentUnionByChild, union, mainPersonId, originOf);
-      const top = union.partners.length === 2 ? createCoupleBox(partners, partnerGeneration, mainId, originOf) : createPersonBox(union.partners[0], partnerGeneration);
+      const marriageGap = marriageGapForUnion(graph, parentUnionByChild, union, originOf);
+      const top = union.partners.length === 2 ? createCoupleBox(partners, partnerGeneration, mainId, originOf, marriageGap) : createPersonBox(union.partners[0], partnerGeneration);
       if (top.originOf) {
         pendingOriginLinks.push({ couple: top, sharedPersonId: top.originOf });
       }
@@ -830,6 +834,11 @@
       return [{ couple: pending.couple, originRoot, sharedPersonId: pending.sharedPersonId }];
     });
     return { roots, originLinks };
+  }
+  function marriageGapForUnion(graph, parentUnionByChild, union, originOf) {
+    const hasChildren = (graph.childrenMap.get(union.id) ?? []).length > 0;
+    const hasOriginPartner = !!originOf || union.partners.some((partnerId) => parentUnionByChild.has(partnerId));
+    return hasChildren || hasOriginPartner ? BRANCHED_MARRIAGE_GAP : BASE_MARRIAGE_GAP;
   }
   function orderPartnersForMain(graph, parentUnionByChild, union, mainPersonId, originOf) {
     if (!mainPersonId || !originOf || union.partners.length !== 2) return [...union.partners];
@@ -1147,7 +1156,7 @@
       return box.width;
     }
     if (box.kind === "couple") {
-      box.width = MARRIAGE_GAP + SLOT;
+      box.width = (box.marriageGap ?? BASE_MARRIAGE_GAP) + SLOT;
       return box.width;
     }
     if (box.kind === "family") {
@@ -1336,7 +1345,7 @@
     return Math.max(PERSON_GAP, previousRight + MIN_GAP + currentLeft);
   }
   function requiresSiblingFamilySpace(box) {
-    return box.kind === "family" && (box.children?.length ?? 0) > 0;
+    return box.kind === "family";
   }
   function assertFamilyAnchors(box, expectedDropX) {
     if (!box.top || !box.children || box.children.length === 0) return;
@@ -1554,7 +1563,7 @@
           const fixed = leftHasParents ? left : right;
           const free = leftHasParents ? right : left;
           const side = (free.x ?? 0) >= (fixed.x ?? 0) ? 1 : -1;
-          free.x = (fixed.x ?? 0) + side * MARRIAGE_GAP;
+          free.x = (fixed.x ?? 0) + side * marriageGapForGraphUnion(graph, union);
           const newCenter = ((fixed.x ?? 0) + (free.x ?? 0)) / 2;
           const dx2 = newCenter - childCenter;
           for (const childId of childIds) {
@@ -1570,7 +1579,7 @@
           const fixed = leftShared ? left : right;
           const free = leftShared ? right : left;
           const side = (free.x ?? 0) >= (fixed.x ?? 0) ? 1 : -1;
-          free.x = (fixed.x ?? 0) + side * MARRIAGE_GAP;
+          free.x = (fixed.x ?? 0) + side * marriageGapForGraphUnion(graph, union);
           const newCenter = ((fixed.x ?? 0) + (free.x ?? 0)) / 2;
           const dx2 = newCenter - childCenter;
           for (const childId of childIds) {
@@ -1595,6 +1604,15 @@
   function computeParentCenter(graph, partnerIds) {
     const xs = partnerIds.map((partnerId) => graph.persons.get(partnerId)?.x).filter((x) => Number.isFinite(x));
     return xs.reduce((sum, x) => sum + x, 0) / xs.length;
+  }
+  function marriageGapForGraphUnion(graph, union) {
+    const hasChildren = (graph.childrenMap.get(union.id) ?? []).length > 0;
+    const parentUnionByChild = /* @__PURE__ */ new Set();
+    for (const childIds of graph.childrenMap.values()) {
+      for (const childId of childIds) parentUnionByChild.add(childId);
+    }
+    const hasOriginPartner = union.partners.some((partnerId) => parentUnionByChild.has(partnerId));
+    return hasChildren || hasOriginPartner ? BRANCHED_MARRIAGE_GAP : BASE_MARRIAGE_GAP;
   }
   function alignGraphOriginLinks(graph, originLinks, layoutPlan) {
     let changed = false;
@@ -1631,7 +1649,8 @@
       if (!shared || !other || !Number.isFinite(shared.x) || !Number.isFinite(other.x)) continue;
       if (Math.abs((shared.x ?? 0) - (other.x ?? 0)) <= 100) continue;
       const sharedIsRight = (shared.x ?? 0) >= (other.x ?? 0);
-      const targetX = (other.x ?? 0) + (sharedIsRight ? MARRIAGE_GAP : -MARRIAGE_GAP);
+      const marriageGap = link.couple.marriageGap ?? MARRIAGE_GAP;
+      const targetX = (other.x ?? 0) + (sharedIsRight ? marriageGap : -marriageGap);
       const dx = targetX - (shared.x ?? 0);
       const moveIds = collectMemberIds(link.originRoot);
       const before = /* @__PURE__ */ new Map();
@@ -2298,7 +2317,8 @@
   var R = NODE_SIZE / 2;
   var SIBSHIP_DROP = NODE_SIZE * 1.25;
   function buildLayoutResult(graph, input) {
-    const nodes = [...graph.persons.values()].map((person) => ({
+    const displayGraph = graphForDisplayRouting(graph);
+    const nodes = [...displayGraph.persons.values()].map((person) => ({
       id: person.id,
       sex: person.sex,
       affected: person.affected,
@@ -2315,8 +2335,8 @@
     }));
     const inputPeople = new Map(input.persons.map((person) => [person.id, person]));
     const inputUnions = new Map(input.unions.map((union) => [union.id, union]));
-    const unionAnchors = buildUnionAnchors(graph);
-    const relationshipSegments = buildRelationshipSegments(graph, inputPeople, inputUnions, unionAnchors);
+    const unionAnchors = buildUnionAnchors(displayGraph);
+    const relationshipSegments = buildRelationshipSegments(displayGraph, inputPeople, inputUnions, unionAnchors);
     const bounds = computeBounds(nodes);
     const generationLabels = buildGenerationLabels(nodes, bounds);
     return {
@@ -2339,24 +2359,33 @@
         y: Number.isFinite(person.y) ? person.y : node.y
       };
     });
-    const positions = nodes.map((node) => ({
-      id: node.id,
-      x: node.x,
-      y: node.y,
-      generation: node.generation
-    }));
     const graph = graphFromLayout(nodes, options.unions, options.childrenMap);
     validateGraph(graph);
+    const displayGraph = graphForDisplayRouting(graph);
+    const displayNodes = [...displayGraph.persons.values()].map((person) => ({
+      id: person.id,
+      sex: person.sex,
+      affected: person.affected,
+      carrier: person.carrier,
+      x: person.x ?? 0,
+      y: person.y ?? 0,
+      generation: person.generation ?? 0
+    }));
     const inputPeople = new Map(options.people.map((person) => [person.id, person]));
     const inputUnions = new Map(options.unions.map((union) => [union.id, union]));
-    const unionAnchors = buildUnionAnchors(graph);
-    const relationshipSegments = buildRelationshipSegments(graph, inputPeople, inputUnions, unionAnchors);
-    const bounds = computeBounds(nodes);
-    const generationLabels = buildGenerationLabels(nodes, bounds);
+    const unionAnchors = buildUnionAnchors(displayGraph);
+    const relationshipSegments = buildRelationshipSegments(displayGraph, inputPeople, inputUnions, unionAnchors);
+    const bounds = computeBounds(displayNodes);
+    const generationLabels = buildGenerationLabels(displayNodes, bounds);
     return {
       ...options.layout,
-      nodes,
-      positions,
+      nodes: displayNodes,
+      positions: displayNodes.map((node) => ({
+        id: node.id,
+        x: node.x,
+        y: node.y,
+        generation: node.generation
+      })),
       relationshipSegments,
       unionAnchors,
       bounds,
@@ -2384,6 +2413,61 @@
       ])),
       childrenMap: new Map(childrenMap.map(([unionId, childIds]) => [unionId, [...childIds]]))
     };
+  }
+  function graphForDisplayRouting(graph) {
+    const displayGraph = {
+      persons: new Map([...graph.persons.entries()].map(([id, person]) => [id, { ...person }])),
+      unions: new Map([...graph.unions.entries()].map(([id, union]) => [id, { ...union, partners: [...union.partners] }])),
+      childrenMap: new Map([...graph.childrenMap.entries()].map(([unionId, childIds]) => [unionId, [...childIds]]))
+    };
+    moveDisplayOriginFamiliesOutsideSourceSiblingRails(displayGraph);
+    return displayGraph;
+  }
+  function moveDisplayOriginFamiliesOutsideSourceSiblingRails(graph) {
+    const parentUnionByChild = /* @__PURE__ */ new Map();
+    for (const [unionId, childIds] of graph.childrenMap.entries()) {
+      for (const childId of childIds) {
+        if (!parentUnionByChild.has(childId)) parentUnionByChild.set(childId, unionId);
+      }
+    }
+    for (const union of graph.unions.values()) {
+      if (union.partners.length !== 2 || (graph.childrenMap.get(union.id) ?? []).length > 0) continue;
+      const [firstId, secondId] = union.partners;
+      const firstParentUnionId = parentUnionByChild.get(firstId);
+      const secondParentUnionId = parentUnionByChild.get(secondId);
+      if (!firstParentUnionId || !secondParentUnionId) continue;
+      const firstSiblingCount = graph.childrenMap.get(firstParentUnionId)?.length ?? 0;
+      const secondSiblingCount = graph.childrenMap.get(secondParentUnionId)?.length ?? 0;
+      if (Math.max(firstSiblingCount, secondSiblingCount) < 2 || firstSiblingCount === secondSiblingCount) continue;
+      const sourceId = firstSiblingCount > secondSiblingCount ? firstId : secondId;
+      const originId = sourceId === firstId ? secondId : firstId;
+      const sourceParentUnionId = sourceId === firstId ? firstParentUnionId : secondParentUnionId;
+      const originParentUnionId = originId === firstId ? firstParentUnionId : secondParentUnionId;
+      moveDisplayOriginFamilyOutsideSiblingRail(graph, sourceParentUnionId, originParentUnionId, originId);
+    }
+  }
+  function moveDisplayOriginFamilyOutsideSiblingRail(graph, sourceParentUnionId, originParentUnionId, originId) {
+    const origin = graph.persons.get(originId);
+    if (!origin || !Number.isFinite(origin.x)) return;
+    const siblingXs = (graph.childrenMap.get(sourceParentUnionId) ?? []).map((id) => graph.persons.get(id)?.x).filter((x) => Number.isFinite(x));
+    if (siblingXs.length < 2) return;
+    const minX = Math.min(...siblingXs);
+    const maxX = Math.max(...siblingXs);
+    const originX = origin.x ?? 0;
+    if (originX <= minX || originX >= maxX) return;
+    const targetX = originX - minX <= maxX - originX ? minX - NODE_SIZE * 1.3 : maxX + NODE_SIZE * 1.3;
+    const dx = targetX - originX;
+    for (const id of displayOriginFamilyIds(graph, originParentUnionId)) {
+      const person = graph.persons.get(id);
+      if (person && Number.isFinite(person.x)) person.x = (person.x ?? 0) + dx;
+    }
+  }
+  function displayOriginFamilyIds(graph, originParentUnionId) {
+    const ids = /* @__PURE__ */ new Set();
+    const union = graph.unions.get(originParentUnionId);
+    union?.partners.forEach((id) => ids.add(id));
+    (graph.childrenMap.get(originParentUnionId) ?? []).forEach((id) => ids.add(id));
+    return ids;
   }
   function normalizePartners(union) {
     if (union.partners.length === 1) return [union.partners[0]];
@@ -2415,12 +2499,7 @@
       const partners = union.partners.map((id) => graph.persons.get(id)).filter(hasCoordinates);
       if (partners.length === 2) {
         const [left, right] = partners[0].x <= partners[1].x ? [partners[0], partners[1]] : [partners[1], partners[0]];
-        const points = Math.abs(left.y - right.y) < 0.5 ? [{ x: left.x + R, y: left.y }, { x: right.x - R, y: right.y }] : [
-          { x: left.x + R, y: left.y },
-          { x: (left.x + right.x) / 2, y: left.y },
-          { x: (left.x + right.x) / 2, y: right.y },
-          { x: right.x - R, y: right.y }
-        ];
+        const points = marriageLinePoints(graph, left, right, parentIds);
         segments.push({
           id: `${union.id}:marriage`,
           type: "marriage",
@@ -2441,7 +2520,7 @@
       if (kids.length === 0 || partners.length === 0) continue;
       const anchor = anchors.get(union.id);
       const dropX = anchor?.x ?? avg(partners.map((person) => person.x));
-      const dropTopY = partners.length === 2 ? anchor?.y ?? avg(partners.map((person) => person.y)) : partners[0].y + R;
+      const dropTopY = partners.length === 2 ? anchor?.y ?? avg(partners.map((person) => person.y)) : partners[0].y;
       const childTopY = Math.min(...kids.map((kid) => kid.y)) - R;
       const siblingY = childTopY - SIBSHIP_DROP + R;
       const sortedKids = [...kids].sort((a, b) => a.x - b.x);
@@ -2490,7 +2569,7 @@
                 childIds: [child.id],
                 personIds: [child.id]
               },
-              points: [{ x: child.x, y: siblingY }, { x: child.x, y: child.y - R }]
+              points: [{ x: child.x, y: siblingY }, { x: child.x, y: child.y }]
             });
           }
           continue;
@@ -2511,7 +2590,7 @@
               childIds: [child.id],
               personIds: [child.id]
             },
-            points: [{ x: apexX, y: siblingY }, { x: child.x, y: forkY }, { x: child.x, y: child.y - R }]
+            points: [{ x: apexX, y: siblingY }, { x: child.x, y: forkY }, { x: child.x, y: child.y }]
           });
         }
         if (group.twinType === "identical") {
@@ -2538,7 +2617,94 @@
         }
       }
     }
-    return segments;
+    return applyParentDropDetours(segments);
+  }
+  function marriageLinePoints(graph, left, right, partnerIds) {
+    const start = { x: left.x, y: left.y };
+    const end = { x: right.x, y: right.y };
+    if (Math.abs(left.y - right.y) >= 0.5) {
+      const mx = (left.x + right.x) / 2;
+      return [start, { x: mx, y: left.y }, { x: mx, y: right.y }, end];
+    }
+    const blockers = [...graph.persons.values()].filter(
+      (person) => hasCoordinates(person) && !partnerIds.includes(person.id) && Math.abs(person.y - left.y) < 0.5 && person.x > start.x && person.x < end.x
+    );
+    if (blockers.length === 0) return [start, end];
+    const routeY = left.y + NODE_SIZE * 2.15;
+    return [start, { x: start.x, y: routeY }, { x: end.x, y: routeY }, end];
+  }
+  function applyParentDropDetours(segments) {
+    const siblingLines = segments.filter(
+      (segment) => segment.kind === "sibling-line" && isHorizontal(segment.points)
+    );
+    const removedSegmentIds = /* @__PURE__ */ new Set();
+    const routed = segments.map((segment) => {
+      if (segment.kind !== "parent-drop" || !isVertical(segment.points) || (segment.childIds ?? []).length !== 1) {
+        return segment;
+      }
+      const blockers = siblingLines.filter(
+        (line) => line.unionId !== segment.unionId && !sharesAny(line.childIds ?? [], segment.childIds ?? []) && verticalCrossesSiblingLine(segment.points, line)
+      );
+      if (blockers.length === 0) return segment;
+      const childDrop = segments.find(
+        (candidate) => candidate.kind === "child-drop" && candidate.unionId === segment.unionId && candidate.childIds?.[0] === segment.childIds?.[0] && candidate.points.length >= 2
+      );
+      if (!childDrop) return segment;
+      removedSegmentIds.add(childDrop.id);
+      return { ...segment, points: detourParentDropPoints(segment.points, childDrop.points[childDrop.points.length - 1], blockers) };
+    });
+    return routed.filter((segment) => !removedSegmentIds.has(segment.id));
+  }
+  function isHorizontal(points) {
+    return points.length === 2 && Math.abs(points[0].y - points[1].y) < 0.5;
+  }
+  function isVertical(points) {
+    return points.length === 2 && Math.abs(points[0].x - points[1].x) < 0.5;
+  }
+  function verticalCrossesSiblingLine(points, siblingLine) {
+    const [start, end] = siblingLine.points;
+    const x = points[0].x;
+    const minX = Math.min(start.x, end.x);
+    const maxX = Math.max(start.x, end.x);
+    const y = start.y;
+    const minY = Math.min(points[0].y, points[1].y);
+    const maxY = Math.max(points[0].y, points[1].y);
+    return x > minX + 0.5 && x < maxX - 0.5 && y >= minY - 0.5 && y <= maxY + 0.5;
+  }
+  function detourParentDropPoints(points, target, blockers) {
+    const [start] = points;
+    const clearance = Math.max(10, R * 0.45);
+    const blockerBounds = blockers.map((line) => {
+      const [a, b] = line.points;
+      return {
+        minX: Math.min(a.x, b.x),
+        maxX: Math.max(a.x, b.x),
+        y: a.y
+      };
+    });
+    const minX = Math.min(...blockerBounds.map((blocker) => blocker.minX));
+    const maxX = Math.max(...blockerBounds.map((blocker) => blocker.maxX));
+    const topY = Math.min(...blockerBounds.map((blocker) => blocker.y)) - clearance;
+    const bottomY = Math.max(...blockerBounds.map((blocker) => blocker.y)) + clearance;
+    const detourX = target.x - minX <= maxX - target.x ? minX - NODE_SIZE : maxX + NODE_SIZE;
+    return dedupePoints([
+      start,
+      { x: start.x, y: topY },
+      { x: detourX, y: topY },
+      { x: detourX, y: bottomY },
+      { x: target.x, y: bottomY },
+      target
+    ]);
+  }
+  function dedupePoints(points) {
+    return points.filter((point, index) => {
+      const previous = points[index - 1];
+      return !previous || Math.abs(previous.x - point.x) >= 0.5 || Math.abs(previous.y - point.y) >= 0.5;
+    });
+  }
+  function sharesAny(left, right) {
+    const rightSet = new Set(right);
+    return left.some((id) => rightSet.has(id));
   }
   function groupChildren(children, inputPeople) {
     const groups = [];
@@ -2645,6 +2811,9 @@
     validateChildrenMapEntries(input.childrenMap);
   }
   function layoutInputToGraph(input) {
+    const childCountByUnion = new Map(input.childrenMap.map(([unionId, childIds]) => [unionId, childIds.length]));
+    const relevantUnions = input.unions.map((union) => ({ id: union.id, partners: normalizePartners(union) })).filter((union) => union.partners.length > 1 || (childCountByUnion.get(union.id) ?? 0) > 0);
+    const relevantUnionIds = new Set(relevantUnions.map((union) => union.id));
     return {
       persons: new Map(input.persons.map((person) => [
         person.id,
@@ -2656,14 +2825,11 @@
           twinType: person.twinType
         }
       ])),
-      unions: new Map(input.unions.map((union) => [
+      unions: new Map(relevantUnions.map((union) => [
         union.id,
-        {
-          id: union.id,
-          partners: normalizePartners(union)
-        }
+        union
       ])),
-      childrenMap: new Map(input.childrenMap.map(([unionId, childIds]) => [unionId, [...childIds]]))
+      childrenMap: new Map(input.childrenMap.filter(([unionId, childIds]) => childIds.length > 0 || relevantUnionIds.has(unionId)).map(([unionId, childIds]) => [unionId, [...childIds]]))
     };
   }
   function assertUniqueIds(ids, kind) {

@@ -1,6 +1,6 @@
 import { PedigreeGraph } from "../model/pedigreeGraph";
 import { assertLayoutInvariants } from "../rules/validation";
-import { Box, createPersonBox, GENERATION_GAP, MARRIAGE_GAP, MIN_GAP, NODE_SIZE, PERSON_GAP, SIBLING_GAP, SLOT } from "./boxModel";
+import { BASE_MARRIAGE_GAP, BRANCHED_MARRIAGE_GAP, Box, createPersonBox, GENERATION_GAP, MARRIAGE_GAP, MIN_GAP, NODE_SIZE, PERSON_GAP, SIBLING_GAP, SLOT } from "./boxModel";
 import { buildForest, OriginLink } from "./familyForest";
 import { buildLayoutPlan, LayoutPlan } from "./layoutPlan";
 import { GenerationOrder, getGenerationOrder } from "./layoutOrder";
@@ -21,7 +21,7 @@ export function measureBox(box: Box): number {
   }
 
   if (box.kind === "couple") {
-    box.width = MARRIAGE_GAP + SLOT;
+    box.width = (box.marriageGap ?? BASE_MARRIAGE_GAP) + SLOT;
     return box.width;
   }
 
@@ -251,7 +251,7 @@ function siblingAnchorGap(previous: Box, current: Box): number {
 }
 
 function requiresSiblingFamilySpace(box: Box): boolean {
-  return box.kind === "family" && (box.children?.length ?? 0) > 0;
+  return box.kind === "family";
 }
 
 function assertFamilyAnchors(box: Box, expectedDropX: number) {
@@ -544,7 +544,7 @@ function alignGraphParentDrops(graph: PedigreeGraph, originLinks: OriginLink[] =
         const fixed = leftHasParents ? left : right;
         const free = leftHasParents ? right : left;
         const side = (free.x ?? 0) >= (fixed.x ?? 0) ? 1 : -1;
-        free.x = (fixed.x ?? 0) + side * MARRIAGE_GAP;
+        free.x = (fixed.x ?? 0) + side * marriageGapForGraphUnion(graph, union);
         const newCenter = ((fixed.x ?? 0) + (free.x ?? 0)) / 2;
         const dx = newCenter - childCenter;
         for (const childId of childIds) {
@@ -561,7 +561,7 @@ function alignGraphParentDrops(graph: PedigreeGraph, originLinks: OriginLink[] =
         const fixed = leftShared ? left : right;
         const free = leftShared ? right : left;
         const side = (free.x ?? 0) >= (fixed.x ?? 0) ? 1 : -1;
-        free.x = (fixed.x ?? 0) + side * MARRIAGE_GAP;
+        free.x = (fixed.x ?? 0) + side * marriageGapForGraphUnion(graph, union);
         const newCenter = ((fixed.x ?? 0) + (free.x ?? 0)) / 2;
         const dx = newCenter - childCenter;
         for (const childId of childIds) {
@@ -593,6 +593,19 @@ function computeParentCenter(graph: PedigreeGraph, partnerIds: readonly string[]
     .map((partnerId) => graph.persons.get(partnerId)?.x)
     .filter((x): x is number => Number.isFinite(x));
   return xs.reduce((sum, x) => sum + x, 0) / xs.length;
+}
+
+function marriageGapForGraphUnion(
+  graph: PedigreeGraph,
+  union: { id: string; partners: readonly string[] }
+) {
+  const hasChildren = (graph.childrenMap.get(union.id) ?? []).length > 0;
+  const parentUnionByChild = new Set<string>();
+  for (const childIds of graph.childrenMap.values()) {
+    for (const childId of childIds) parentUnionByChild.add(childId);
+  }
+  const hasOriginPartner = union.partners.some((partnerId) => parentUnionByChild.has(partnerId));
+  return hasChildren || hasOriginPartner ? BRANCHED_MARRIAGE_GAP : BASE_MARRIAGE_GAP;
 }
 
 function alignGraphOriginLinks(graph: PedigreeGraph, originLinks: OriginLink[], layoutPlan: LayoutPlan) {
@@ -638,7 +651,8 @@ function alignGraphOriginMarriagesSafely(graph: PedigreeGraph, originLinks: Orig
     if (Math.abs((shared.x ?? 0) - (other.x ?? 0)) <= 100) continue;
 
     const sharedIsRight = (shared.x ?? 0) >= (other.x ?? 0);
-    const targetX = (other.x ?? 0) + (sharedIsRight ? MARRIAGE_GAP : -MARRIAGE_GAP);
+    const marriageGap = link.couple.marriageGap ?? MARRIAGE_GAP;
+    const targetX = (other.x ?? 0) + (sharedIsRight ? marriageGap : -marriageGap);
     const dx = targetX - (shared.x ?? 0);
     const moveIds = collectMemberIds(link.originRoot);
     const before = new Map<string, number>();

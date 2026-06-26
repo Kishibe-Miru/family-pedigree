@@ -1,11 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { NODE_SIZE } from "../src/layout/boxModel";
 import { applyManualNodePositionsToLayout } from "../src/layout/layoutResultBuilder";
 import { LayoutInput, LayoutResult } from "../src/model/layoutResult";
 import { layout } from "../src/browser/entry";
-
-const R = NODE_SIZE / 2;
 
 test("manual child coordinates rebuild the child relationship segment", () => {
   const input = familyInput();
@@ -36,7 +33,7 @@ test("manual child coordinates rebuild the child relationship segment", () => {
   );
   assert.ok(childSegment);
   const endpoint = childSegment.points[childSegment.points.length - 1];
-  assert.deepEqual(endpoint, { x: manualX, y: manualY - R });
+  assert.deepEqual(endpoint, { x: manualX, y: manualY });
 });
 
 test("manual spouse coordinates rebuild the marriage segment", () => {
@@ -74,7 +71,7 @@ test("manual spouse coordinates rebuild the marriage segment", () => {
   const marriage = finalLayout.relationshipSegments.find((segment) => segment.type === "marriage");
   assert.ok(marriage);
   const endpoint = marriage.points[marriage.points.length - 1];
-  assert.deepEqual(endpoint, { x: manualX - R, y: manualY });
+  assert.deepEqual(endpoint, { x: manualX, y: manualY });
 });
 
 test("non-manual nodes keep engine coordinates while rebuilding relationship segments", () => {

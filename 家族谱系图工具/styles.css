@@ -193,7 +193,9 @@ kbd {
 .person-symbol.carrier { fill: url(#carrierPattern); }
 .twin-bar { stroke: var(--node-ink); stroke-width: 2.2; }
 .person-label { font: 13px "Microsoft YaHei", sans-serif; fill: #172026; text-anchor: middle; dominant-baseline: hanging; }
-.id-label { font: 600 12px "Microsoft YaHei", sans-serif; fill: #3a444c; text-anchor: end; dominant-baseline: hanging; }
+.id-label { font: 600 12px "Microsoft YaHei", sans-serif; fill: #3a444c; dominant-baseline: hanging; }
+.id-label-left { text-anchor: end; }
+.id-label-right { text-anchor: start; }
 .diagnosis-label { font: 11px "Microsoft YaHei", sans-serif; fill: #5a6b8c; text-anchor: middle; dominant-baseline: hanging; }
 .meta-label { font: 11px "Microsoft YaHei", sans-serif; fill: #65717b; text-anchor: middle; dominant-baseline: hanging; }
 .generation-label { font: 700 14px "Microsoft YaHei", sans-serif; fill: #9aa6b0; text-anchor: middle; dominant-baseline: middle; }

@@ -112,7 +112,7 @@ function drawPerson(root, ctx, person, options = {}) {
       class: "proband-arrow",
       "marker-end": "url(#arrow)"
     }));
-    group.appendChild(svgEl("text", { x: ax - 4, y: ay + 12, class: "proband-label" }, "P"));
+    group.appendChild(svgEl("text", { x: ax - 22, y: ay + 12, class: "proband-label" }, "P"));
   }
 
   if (options.selected) {
@@ -149,27 +149,32 @@ function drawPerson(root, ctx, person, options = {}) {
   }
 
   if (settings.showNumber) {
-    group.appendChild(svgEl("text", { x: person.x - R_UI - 5, y: person.y - R_UI + 2, class: "id-label" }, ctx.state.numberMap.get(person.id) || ""));
+    const label = ctx.state.numberMap.get(person.id) || "";
+    const labelPosition = idLabelPosition(ctx, person, label);
+    group.appendChild(svgEl("text", {
+      x: labelPosition.x,
+      y: labelPosition.y,
+      class: `id-label ${labelPosition.side === "right" ? "id-label-right" : "id-label-left"}`
+    }, label));
   }
 
-  let ty = person.y + LABEL_OFFSET_UI;
-  if (settings.showName && person.name) {
-    group.appendChild(svgEl("text", { x: person.x, y: ty, class: "person-label" }, person.name));
-    ty += 15;
-  }
+  const labelRows = [];
+  if (settings.showName && person.name) labelRows.push({ text: person.name, className: "person-label", fontSize: 13, height: 15 });
   if (settings.showAge) {
     const meta = [person.age && `${person.age}岁`, person.birthYear && `b.${person.birthYear}`].filter(Boolean).join(" ");
-    if (meta) {
-      group.appendChild(svgEl("text", { x: person.x, y: ty, class: "meta-label" }, meta));
-      ty += 14;
-    }
+    if (meta) labelRows.push({ text: meta, className: "meta-label", fontSize: 11, height: 14 });
   }
   if (settings.showDiagnosis && person.diagnoses.length) {
     person.diagnoses.slice(0, 3).forEach((diagnosis) => {
-      group.appendChild(svgEl("text", { x: person.x, y: ty, class: "diagnosis-label" }, diagnosis));
-      ty += 14;
+      labelRows.push({ text: diagnosis, className: "diagnosis-label", fontSize: 11, height: 14 });
     });
   }
+  const labelPosition = personLabelStackPosition(ctx, person, labelRows);
+  let ty = labelPosition.y;
+  labelRows.forEach((row) => {
+    group.appendChild(svgEl("text", { x: labelPosition.x, y: ty, class: row.className }, row.text));
+    ty += row.height;
+  });
 
   root.appendChild(group);
 }
@@ -357,6 +362,136 @@ function estimatePersonTextHeight(ctx, person) {
   if (settings.showDiagnosis && person.diagnoses && person.diagnoses.length) height += 16;
   if (settings.showAge && (person.age || person.birthYear)) height += 14;
   return height;
+}
+
+function idLabelPosition(ctx, person, label) {
+  const width = textWidth(label, 12);
+  const sideY = person.y - R_UI + 2;
+  const aboveY = person.y - R_UI - 18;
+  const candidates = [{
+    side: "left",
+    x: person.x - R_UI - 5,
+    y: sideY,
+    rect: { minX: person.x - R_UI - 5 - width, maxX: person.x - R_UI - 5, minY: sideY, maxY: sideY + 14 }
+  }, {
+    side: "right",
+    x: person.x + R_UI + 5,
+    y: sideY,
+    rect: { minX: person.x + R_UI + 5, maxX: person.x + R_UI + 5 + width, minY: sideY, maxY: sideY + 14 }
+  }, {
+    side: "left",
+    x: person.x - R_UI - 5,
+    y: aboveY,
+    rect: { minX: person.x - R_UI - 5 - width, maxX: person.x - R_UI - 5, minY: aboveY, maxY: aboveY + 14 }
+  }, {
+    side: "right",
+    x: person.x + R_UI + 5,
+    y: aboveY,
+    rect: { minX: person.x + R_UI + 5, maxX: person.x + R_UI + 5 + width, minY: aboveY, maxY: aboveY + 14 }
+  }];
+  return candidates.find((candidate) => !labelRectOverlapsVisual(ctx, candidate.rect, person.id)) ?? candidates[0];
+}
+
+function personLabelStackPosition(ctx, person, rows) {
+  if (rows.length === 0) return { x: person.x, y: person.y + LABEL_OFFSET_UI };
+  const width = Math.max(...rows.map((row) => textWidth(row.text, row.fontSize)));
+  const height = rows.reduce((sum, row) => sum + row.height, 0);
+  const baseY = person.y + LABEL_OFFSET_UI;
+  const sideY = person.y + R_UI * 0.35;
+  const candidates = [{
+    x: person.x,
+    y: baseY,
+    rect: centeredRect(person.x, baseY, width, height)
+  }, {
+    x: person.x - R_UI - 8 - width / 2,
+    y: sideY,
+    rect: centeredRect(person.x - R_UI - 8 - width / 2, sideY, width, height)
+  }, {
+    x: person.x + R_UI + 8 + width / 2,
+    y: sideY,
+    rect: centeredRect(person.x + R_UI + 8 + width / 2, sideY, width, height)
+  }, {
+    x: person.x - R_UI - 8 - width / 2,
+    y: baseY,
+    rect: centeredRect(person.x - R_UI - 8 - width / 2, baseY, width, height)
+  }, {
+    x: person.x + R_UI + 8 + width / 2,
+    y: baseY,
+    rect: centeredRect(person.x + R_UI + 8 + width / 2, baseY, width, height)
+  }];
+  return candidates.find((candidate) => !labelRectOverlapsVisual(ctx, candidate.rect, person.id)) ?? candidates[0];
+}
+
+function centeredRect(x, y, width, height) {
+  return { minX: x - width / 2, maxX: x + width / 2, minY: y, maxY: y + height };
+}
+
+function labelRectOverlapsVisual(ctx, rect, selfId) {
+  return labelRectOverlapsSymbol(ctx, rect, selfId) || labelRectOverlapsRelationship(ctx, rect);
+}
+
+function labelRectOverlapsSymbol(ctx, rect, selfId) {
+  return renderPeople(ctx).some((person) => {
+    if (person.id === selfId) return false;
+    return rect.minX < person.x + R_UI &&
+      rect.maxX > person.x - R_UI &&
+      rect.minY < person.y + R_UI &&
+      rect.maxY > person.y - R_UI;
+  });
+}
+
+function labelRectOverlapsRelationship(ctx, rect) {
+  const clearance = 4;
+  const expanded = {
+    minX: rect.minX - clearance,
+    maxX: rect.maxX + clearance,
+    minY: rect.minY - clearance,
+    maxY: rect.maxY + clearance
+  };
+  return relationshipSegments(ctx).some(([from, to]) => segmentIntersectsRect(from, to, expanded));
+}
+
+function relationshipSegments(ctx) {
+  return (ctx.state.layoutResult?.relationshipSegments || []).flatMap((segment) => {
+    const points = segment.points || [];
+    return points.slice(1).map((point, index) => [points[index], point]);
+  });
+}
+
+function segmentIntersectsRect(from, to, rect) {
+  if (pointInsideRect(from, rect) || pointInsideRect(to, rect)) return true;
+  const edges = [
+    [{ x: rect.minX, y: rect.minY }, { x: rect.maxX, y: rect.minY }],
+    [{ x: rect.maxX, y: rect.minY }, { x: rect.maxX, y: rect.maxY }],
+    [{ x: rect.maxX, y: rect.maxY }, { x: rect.minX, y: rect.maxY }],
+    [{ x: rect.minX, y: rect.maxY }, { x: rect.minX, y: rect.minY }]
+  ];
+  return edges.some(([a, b]) => segmentsIntersect(from, to, a, b));
+}
+
+function pointInsideRect(point, rect) {
+  return point.x >= rect.minX && point.x <= rect.maxX && point.y >= rect.minY && point.y <= rect.maxY;
+}
+
+function segmentsIntersect(a, b, c, d) {
+  const d1 = direction(a, b, c);
+  const d2 = direction(a, b, d);
+  const d3 = direction(c, d, a);
+  const d4 = direction(c, d, b);
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+  return d1 === 0 && onSegment(a, b, c) ||
+    d2 === 0 && onSegment(a, b, d) ||
+    d3 === 0 && onSegment(c, d, a) ||
+    d4 === 0 && onSegment(c, d, b);
+}
+
+function direction(a, b, c) {
+  return Math.sign((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x));
+}
+
+function onSegment(a, b, c) {
+  return c.x >= Math.min(a.x, b.x) && c.x <= Math.max(a.x, b.x) &&
+    c.y >= Math.min(a.y, b.y) && c.y <= Math.max(a.y, b.y);
 }
 
 function textWidth(text, fontSize, factor = 0.62) {

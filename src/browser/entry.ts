@@ -84,6 +84,12 @@ export function validateLayoutInput(input: LayoutInput): void {
 }
 
 function layoutInputToGraph(input: LayoutInput): PedigreeGraph {
+  const childCountByUnion = new Map(input.childrenMap.map(([unionId, childIds]) => [unionId, childIds.length]));
+  const relevantUnions = input.unions
+    .map((union) => ({ id: union.id, partners: normalizePartners(union) }))
+    .filter((union) => union.partners.length > 1 || (childCountByUnion.get(union.id) ?? 0) > 0);
+  const relevantUnionIds = new Set(relevantUnions.map((union) => union.id));
+
   return {
     persons: new Map(input.persons.map((person) => [
       person.id,
@@ -95,14 +101,13 @@ function layoutInputToGraph(input: LayoutInput): PedigreeGraph {
         twinType: person.twinType
       }
     ])),
-    unions: new Map(input.unions.map((union) => [
+    unions: new Map(relevantUnions.map((union) => [
       union.id,
-      {
-        id: union.id,
-        partners: normalizePartners(union)
-      }
+      union
     ])),
-    childrenMap: new Map(input.childrenMap.map(([unionId, childIds]) => [unionId, [...childIds]]))
+    childrenMap: new Map(input.childrenMap
+      .filter(([unionId, childIds]) => childIds.length > 0 || relevantUnionIds.has(unionId))
+      .map(([unionId, childIds]) => [unionId, [...childIds]]))
   };
 }
 

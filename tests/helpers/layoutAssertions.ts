@@ -151,7 +151,7 @@ export function assertChildHasVerticalSegmentToNode(layout: LayoutResult, childI
   const segment = findSegmentsByKind(layout, "individual").find((candidate) => {
     if (candidate.personId !== childId) return false;
     const end = candidate.points[candidate.points.length - 1];
-    return Math.abs(end.x - child.x) <= TOLERANCE && Math.abs(end.y - (child.y - NODE_SIZE / 2)) <= TOLERANCE;
+    return Math.abs(end.x - child.x) <= TOLERANCE && Math.abs(end.y - child.y) <= TOLERANCE;
   });
   assert.ok(segment, `missing individual child segment ending at ${childId}`);
 }
@@ -205,5 +205,5 @@ function assertSameMembers(actual: string[] | undefined, expected: string[], lab
 function pointNearNode(point: { x: number; y: number } | undefined, node: LayoutNode) {
   if (!point) return false;
   return Math.abs(point.y - node.y) <= TOLERANCE &&
-    Math.abs(Math.abs(point.x - node.x) - NODE_SIZE / 2) <= TOLERANCE;
+    Math.abs(point.x - node.x) <= TOLERANCE;
 }

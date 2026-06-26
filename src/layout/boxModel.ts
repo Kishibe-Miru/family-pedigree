@@ -1,7 +1,9 @@
 export const NODE_SIZE = 44;
 export const PERSON_GAP = NODE_SIZE * 2.7;
 export const SLOT = PERSON_GAP;
-export const MARRIAGE_GAP = NODE_SIZE * 1.6;
+export const BASE_MARRIAGE_GAP = NODE_SIZE * 2.1;
+export const BRANCHED_MARRIAGE_GAP = NODE_SIZE * 2.25;
+export const MARRIAGE_GAP = BRANCHED_MARRIAGE_GAP;
 export const SIBLING_GAP = PERSON_GAP;
 export const MIN_GAP = NODE_SIZE * 0.8;
 export const GENERATION_GAP = NODE_SIZE * 3.7;
@@ -21,6 +23,7 @@ export interface Box {
   mainPersonId?: string;
   originOf?: string;
   exitMember?: string;
+  marriageGap?: number;
   _childrenW?: number;
   _topW?: number;
 }
@@ -42,21 +45,28 @@ export function createPersonBox(personId: string, generation: number): Box {
   };
 }
 
-export function createCoupleBox(partnerIds: string[], generation: number, mainPersonId?: string, originOf?: string): Box {
+export function createCoupleBox(
+  partnerIds: string[],
+  generation: number,
+  mainPersonId?: string,
+  originOf?: string,
+  marriageGap = BASE_MARRIAGE_GAP
+): Box {
   const [leftId, rightId] = partnerIds;
   const offsets = new Map<string, number>();
-  const partnerOffset = MARRIAGE_GAP / 2;
+  const partnerOffset = marriageGap / 2;
   if (leftId) offsets.set(leftId, partnerIds.length === 1 ? 0 : -partnerOffset);
   if (rightId) offsets.set(rightId, partnerOffset);
 
   return {
     kind: "couple",
-    width: Math.max(SLOT * partnerIds.length, MARRIAGE_GAP + SLOT),
+    width: Math.max(SLOT * partnerIds.length, marriageGap + SLOT),
     cx: 0,
     gen: generation,
     members: [...partnerIds],
     mainPersonId,
     originOf,
+    marriageGap,
     anchorX(id: string) {
       return this.cx + (offsets.get(id) ?? 0);
     },

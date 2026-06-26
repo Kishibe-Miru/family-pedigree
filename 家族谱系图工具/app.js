@@ -20,8 +20,8 @@ const VERSION = "5.2";
 
 // 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
 const PLACEHOLDER_NAMES = new Set([
-  "先证者", "父", "母", "兄弟", "姐妹", "儿子", "女儿", "子女", "同胞",
-  "配偶", "孪生兄弟", "孪生姐妹"
+  "先证者", "父", "母", "哥哥", "弟弟", "姐姐", "妹妹", "兄弟", "姐妹", "儿子", "女儿", "子女", "同胞",
+  "配偶", "孪生哥哥", "孪生弟弟", "孪生姐姐", "孪生妹妹", "孪生兄弟", "孪生姐妹"
 ]);
 function realName(p) {
   if (!p || !p.name) return "";
@@ -78,14 +78,16 @@ function cacheElements() {
   const ids = [
     "projectMeta", "undoBtn", "redoBtn", "newProjectBtn", "saveJsonBtn",
     "loadJsonInput", "exportPngBtn", "exportSvgBtn", "addProbandBtn", "addPersonBtn",
-    "addFatherBtn", "addMotherBtn", "addPartnerBtn", "addBrotherBtn", "addSisterBtn",
+    "addFatherBtn", "addMotherBtn", "addPartnerBtn", "addOlderBrotherBtn", "addYoungerBrotherBtn",
+    "addOlderSisterBtn", "addYoungerSisterBtn",
     "addSonBtn", "addDaughterBtn", "autoLayoutBtn", "zoomInBtn", "zoomOutBtn", "resetViewBtn", "zoomLabel",
     "optShowNumber", "optShowName", "optShowDiagnosis", "optShowAge", "optShowLegend",
     "optShowTitle", "canvasArea", "canvasWrap", "pedigreeSvg", "statusLine",
     "emptySelection", "personForm", "personName", "personSex", "personAffectedStatus",
     "personAge", "personBirthYear", "personDeceased", "personProband",
     "diagnosisSelect", "diagnosisTags", "personNotes", "setProbandBtn", "clearManualBtn", "deletePersonBtn",
-    "addTwinBrotherBtn", "addTwinSisterBtn", "linkPartnerBtn", "optSnapDrag", "familyHistoryBtn",
+    "addOlderTwinBrotherBtn", "addYoungerTwinBrotherBtn", "addOlderTwinSisterBtn", "addYoungerTwinSisterBtn",
+    "linkPartnerBtn", "optSnapDrag", "familyHistoryBtn",
     "historyDialog", "historyText", "copyHistoryBtn", "closeHistoryBtn",
     "identicalRow", "personIdentical"
   ];
@@ -98,12 +100,16 @@ function bindEvents() {
   els.addFatherBtn.addEventListener("click", () => addParent("male"));
   els.addMotherBtn.addEventListener("click", () => addParent("female"));
   els.addPartnerBtn.addEventListener("click", addPartner);
-  els.addBrotherBtn.addEventListener("click", () => addSibling("male"));
-  els.addSisterBtn.addEventListener("click", () => addSibling("female"));
+  els.addOlderBrotherBtn.addEventListener("click", () => addSibling("male", "older"));
+  els.addYoungerBrotherBtn.addEventListener("click", () => addSibling("male", "younger"));
+  els.addOlderSisterBtn.addEventListener("click", () => addSibling("female", "older"));
+  els.addYoungerSisterBtn.addEventListener("click", () => addSibling("female", "younger"));
   els.addSonBtn.addEventListener("click", () => addChild("male"));
   els.addDaughterBtn.addEventListener("click", () => addChild("female"));
-  els.addTwinBrotherBtn.addEventListener("click", () => addTwin("male"));
-  els.addTwinSisterBtn.addEventListener("click", () => addTwin("female"));
+  els.addOlderTwinBrotherBtn.addEventListener("click", () => addTwin("male", "older"));
+  els.addYoungerTwinBrotherBtn.addEventListener("click", () => addTwin("male", "younger"));
+  els.addOlderTwinSisterBtn.addEventListener("click", () => addTwin("female", "older"));
+  els.addYoungerTwinSisterBtn.addEventListener("click", () => addTwin("female", "younger"));
   els.linkPartnerBtn.addEventListener("click", toggleLinkPartner);
   els.familyHistoryBtn.addEventListener("click", showFamilyHistory);
   els.copyHistoryBtn.addEventListener("click", copyFamilyHistory);
@@ -270,7 +276,17 @@ function setBiologicalParentage(childId, parentIds) {
   const ordered = normalizeParentIds(parentIds);
   const union = ensureUnion(ordered);
   state.project.parentages = state.project.parentages.filter((pa) => !(pa.childId === childId && pa.kind === "biological"));
-  return addParentage(ordered, childId, union.id);
+  const parentage = addParentage(ordered, childId, union.id);
+  pruneLayoutInertUnions();
+  return parentage;
+}
+
+function pruneLayoutInertUnions() {
+  ensureDomainArrays();
+  const unionsWithChildren = new Set(state.project.parentages.map((pa) => pa.unionId).filter(Boolean));
+  state.project.unions = state.project.unions.filter((union) =>
+    union.partnerIds.length > 1 || unionsWithChildren.has(union.id)
+  );
 }
 
 function findParents(id) {
@@ -438,14 +454,15 @@ function displayPersonName(p) {
   return realName(p) || p.name || state.numberMap.get(p.id) || p.id;
 }
 
-function addSibling(sex) {
+function addSibling(sex, agePosition = "younger") {
   const person = requireSelection();
   if (!person) return;
   const parents = findParents(person.id);
   pushHistory();
-  const label = sex === "male" ? "兄弟" : sex === "female" ? "姐妹" : "同胞";
+  const label = siblingLabel(sex, agePosition);
   const sib = createPerson({ name: label, sex: sex || "unknown" });
   state.project.people.push(sib);
+  placeSiblingNearSelected(person, sib, agePosition);
   if (parents.length === 0) {
     // 自动补一对未知父母，保证同胞共享父母
     const dad = createPerson({ sex: "male", name: "父" });
@@ -465,17 +482,18 @@ function addSibling(sex) {
 }
 
 // 添加孪生同胞：与选中成员共享父母，并同属一个 twinGroup（从同一点分叉）
-function addTwin(sex) {
+function addTwin(sex, agePosition = "younger") {
   const person = requireSelection();
   if (!person) return;
   const parents = findParents(person.id);
   pushHistory();
-  const label = sex === "male" ? "孪生兄弟" : "孪生姐妹";
+  const label = twinLabel(sex, agePosition);
   // 复用/新建 twinGroup
   let group = person.twinGroup;
   if (!group) { group = makeId("tw"); person.twinGroup = group; if (!person.twinType) person.twinType = "fraternal"; }
   const twin = createPerson({ name: label, sex: sex || "unknown", twinGroup: group, twinType: person.twinType || "fraternal" });
   state.project.people.push(twin);
+  placeSiblingNearSelected(person, twin, agePosition);
   if (parents.length === 0) {
     const dad = createPerson({ sex: "male", name: "父" });
     const mom = createPerson({ sex: "female", name: "母" });
@@ -491,6 +509,31 @@ function addTwin(sex) {
   }
   state.selectedId = person.id;
   autoLayout(); refresh(); fitView();
+}
+
+function siblingLabel(sex, agePosition) {
+  if (sex === "male") return agePosition === "older" ? "哥哥" : "弟弟";
+  if (sex === "female") return agePosition === "older" ? "姐姐" : "妹妹";
+  return agePosition === "older" ? "年长同胞" : "年幼同胞";
+}
+
+function twinLabel(sex, agePosition) {
+  if (sex === "male") return agePosition === "older" ? "孪生哥哥" : "孪生弟弟";
+  if (sex === "female") return agePosition === "older" ? "孪生姐姐" : "孪生妹妹";
+  return agePosition === "older" ? "年长孪生同胞" : "年幼孪生同胞";
+}
+
+function placeSiblingNearSelected(selected, sibling, agePosition) {
+  const selectedOrder = Number.isFinite(selected.order) ? selected.order : nextPersonOrder();
+  sibling.order = agePosition === "older" ? selectedOrder - 0.5 : selectedOrder + 0.5;
+  normalizePersonOrder();
+}
+
+function normalizePersonOrder() {
+  state.project.people
+    .slice()
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .forEach((p, i) => (p.order = i + 1));
 }
 
 function updateTwinType() {
@@ -780,6 +823,10 @@ function buildEngineLayoutInput() {
     if (!childrenByUnion.has(parentage.unionId)) childrenByUnion.set(parentage.unionId, []);
     childrenByUnion.get(parentage.unionId).push(parentage.childId);
   });
+  const layoutUnions = state.project.unions.filter((union) =>
+    union.partnerIds.length > 1 || (childrenByUnion.get(union.id)?.length ?? 0) > 0
+  );
+  const layoutUnionIds = new Set(layoutUnions.map((union) => union.id));
 
   return {
     persons: state.project.people.map((person) => ({
@@ -789,12 +836,12 @@ function buildEngineLayoutInput() {
       twinGroup: person.twinGroup || undefined,
       twinType: person.twinType || undefined
     })),
-    unions: state.project.unions.map((union) => ({
+    unions: layoutUnions.map((union) => ({
       id: union.id,
       partners: [...union.partnerIds],
       consanguineous: union.partnerIds.length === 2 ? areConsanguineous(union.partnerIds[0], union.partnerIds[1]) : false
     })),
-    childrenMap: [...childrenByUnion.entries()]
+    childrenMap: [...childrenByUnion.entries()].filter(([unionId]) => layoutUnionIds.has(unionId))
   };
 }
 
@@ -1030,8 +1077,10 @@ function renderForm() {
 
 function updateButtons() {
   const has = Boolean(selectedPerson());
-  [els.addFatherBtn, els.addMotherBtn, els.addPartnerBtn, els.addBrotherBtn, els.addSisterBtn,
-   els.addSonBtn, els.addDaughterBtn, els.addTwinBrotherBtn, els.addTwinSisterBtn, els.linkPartnerBtn]
+  [els.addFatherBtn, els.addMotherBtn, els.addPartnerBtn, els.addOlderBrotherBtn, els.addYoungerBrotherBtn,
+   els.addOlderSisterBtn, els.addYoungerSisterBtn, els.addSonBtn, els.addDaughterBtn,
+   els.addOlderTwinBrotherBtn, els.addYoungerTwinBrotherBtn, els.addOlderTwinSisterBtn, els.addYoungerTwinSisterBtn,
+   els.linkPartnerBtn]
     .forEach((b) => (b.disabled = !has));
   if (els.linkPartnerBtn) els.linkPartnerBtn.classList.toggle("accent", Boolean(state.linkMode));
   if (els.clearManualBtn) els.clearManualBtn.disabled = !has || !selectedPerson()?.manual;
@@ -1200,8 +1249,8 @@ function onKeyDown(evt) {
   else if (k === "e") { evt.preventDefault(); addPartner(); }
   else if (k === "c") { evt.preventDefault(); addChild("male"); }
   else if (k === "d") { evt.preventDefault(); addChild("female"); }
-  else if (k === "b") { evt.preventDefault(); addSibling("male"); }
-  else if (k === "s") { evt.preventDefault(); addSibling("female"); }
+  else if (k === "b") { evt.preventDefault(); addSibling("male", "younger"); }
+  else if (k === "s") { evt.preventDefault(); addSibling("female", "younger"); }
   else if (evt.key === "Delete" || evt.key === "Backspace") { if (selectedPerson()) { evt.preventDefault(); deleteSelected(); } }
 }
 
@@ -1423,7 +1472,9 @@ function exportStyles() {
   .person-symbol.carrier{fill:url(#carrierPattern)}
   .twin-bar{stroke:#2f3a42;stroke-width:2.2}
   .person-label{font:13px "Microsoft YaHei",sans-serif;fill:#172026;text-anchor:middle;dominant-baseline:hanging}
-  .id-label{font:600 12px "Microsoft YaHei",sans-serif;fill:#3a444c;text-anchor:end;dominant-baseline:hanging}
+  .id-label{font:600 12px "Microsoft YaHei",sans-serif;fill:#3a444c;dominant-baseline:hanging}
+  .id-label-left{text-anchor:end}
+  .id-label-right{text-anchor:start}
   .diagnosis-label{font:11px "Microsoft YaHei",sans-serif;fill:#5a6b8c;text-anchor:middle;dominant-baseline:hanging}
   .meta-label{font:11px "Microsoft YaHei",sans-serif;fill:#65717b;text-anchor:middle;dominant-baseline:hanging}
   .generation-label{font:700 14px "Microsoft YaHei",sans-serif;fill:#9aa6b0;text-anchor:middle;dominant-baseline:middle}

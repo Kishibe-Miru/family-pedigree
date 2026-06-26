@@ -1,6 +1,6 @@
 import { PedigreeGraph } from "../model/pedigreeGraph";
 import { UnionNode } from "../model/union";
-import { Box, createCoupleBox, createFamilyBox, createPersonBox } from "./boxModel";
+import { BASE_MARRIAGE_GAP, BRANCHED_MARRIAGE_GAP, Box, createCoupleBox, createFamilyBox, createPersonBox } from "./boxModel";
 import { sortChildrenForLayout } from "./childOrdering";
 
 export interface OriginLink {
@@ -66,8 +66,9 @@ export function buildForest(graph: PedigreeGraph): ForestBuildResult {
       : undefined;
     const mainId = mainPersonId ?? union.partners.find((partnerId) => !hasParents(partnerId)) ?? union.partners[0];
     const partners = orderPartnersForMain(graph, parentUnionByChild, union, mainPersonId, originOf);
+    const marriageGap = marriageGapForUnion(graph, parentUnionByChild, union, originOf);
     const top = union.partners.length === 2
-      ? createCoupleBox(partners, partnerGeneration, mainId, originOf)
+      ? createCoupleBox(partners, partnerGeneration, mainId, originOf, marriageGap)
       : createPersonBox(union.partners[0], partnerGeneration);
     if (top.originOf) {
       pendingOriginLinks.push({ couple: top, sharedPersonId: top.originOf });
@@ -135,6 +136,17 @@ export function formatForest(boxes: Box[], depth = 0): string {
     const top = box.top ? `\n${formatForest([box.top], depth + 1)}` : "";
     return `${label}${origin}${top}${children}`;
   }).join("\n");
+}
+
+function marriageGapForUnion(
+  graph: PedigreeGraph,
+  parentUnionByChild: Map<string, string>,
+  union: UnionNode,
+  originOf?: string
+) {
+  const hasChildren = (graph.childrenMap.get(union.id) ?? []).length > 0;
+  const hasOriginPartner = !!originOf || union.partners.some((partnerId) => parentUnionByChild.has(partnerId));
+  return hasChildren || hasOriginPartner ? BRANCHED_MARRIAGE_GAP : BASE_MARRIAGE_GAP;
 }
 
 function orderPartnersForMain(

@@ -140,7 +140,7 @@ test("renderLayoutResultToSvg uses finalized manual coordinates", () => {
   const svg = renderLayoutResultToSvg(finalLayout);
 
   assert.match(svg, /points="240,298 262,320 240,342 218,320"/);
-  assert.match(svg, /class="pedigree-line individual-line child-line"[^>]*x2="240" y2="298"/);
+  assert.match(svg, /class="pedigree-line individual-line child-line"[^>]*x2="240" y2="320"/);
 });
 
 test("renderLayoutResultToSvg renders complex known-problem fixture metadata", () => {

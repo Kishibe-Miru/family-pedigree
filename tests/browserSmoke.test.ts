@@ -36,14 +36,24 @@ test("browser smoke renders stable pedigree scenarios", async (t) => {
       await clickButton(page, "＋ 添加先证者");
       await clickButton(page, "父亲 F");
       await clickButton(page, "母亲 M");
-      await clickButton(page, "兄弟 B");
-      await clickButton(page, "姐妹 S");
+      await clickButton(page, "弟弟 B");
+      await clickButton(page, "妹妹 S");
       await clickButton(page, "配偶 E");
       await clickButton(page, "儿子 C");
       await clickButton(page, "女儿 D");
     }));
 
-    scenarioMetrics.push(await runScenario(browser, baseUrl, "03-half-siblings", async (page) => {
+    scenarioMetrics.push(await runScenario(browser, baseUrl, "03-sibling-controls", async (page) => {
+      await clickButton(page, "＋ 添加先证者");
+      await clickButton(page, "哥哥");
+      await clickButton(page, "弟弟 B");
+      await clickButton(page, "姐姐");
+      await clickButton(page, "妹妹 S");
+      await clickButton(page, "孪生弟弟");
+      await clickButton(page, "孪生妹妹");
+    }));
+
+    scenarioMetrics.push(await runScenario(browser, baseUrl, "04-half-siblings", async (page) => {
       await clickButton(page, "＋ 添加先证者");
       await clickButton(page, "配偶 E");
       await clickButton(page, "儿子 C");
@@ -64,7 +74,8 @@ test("browser smoke renders stable pedigree scenarios", async (t) => {
 
   const empty = scenarioMetrics.find((metrics) => metrics.name === "01-empty");
   const family = scenarioMetrics.find((metrics) => metrics.name === "02-three-generation-family");
-  const halfSiblings = scenarioMetrics.find((metrics) => metrics.name === "03-half-siblings");
+  const siblingControls = scenarioMetrics.find((metrics) => metrics.name === "03-sibling-controls");
+  const halfSiblings = scenarioMetrics.find((metrics) => metrics.name === "04-half-siblings");
 
   assert.ok(empty);
   assert.equal(empty.title, "精神科遗传家族谱系图绘制工具 5.2");
@@ -78,6 +89,22 @@ test("browser smoke renders stable pedigree scenarios", async (t) => {
   assert.match(family.projectMeta, /8 名成员/);
   assertNoInvalidSvgAttributes(family);
   assertNoSymbolOverlaps(family);
+  assertNoTextSymbolOverlaps(family);
+  assertNoTextLineOverlaps(family);
+
+  assert.ok(siblingControls);
+  assert.equal(siblingControls.symbolCount, 9);
+  assert.match(siblingControls.projectMeta, /9 名成员/);
+  assert.ok(siblingControls.textLabels.some((label) => label.includes("哥哥")));
+  assert.ok(siblingControls.textLabels.some((label) => label.includes("弟弟")));
+  assert.ok(siblingControls.textLabels.some((label) => label.includes("姐姐")));
+  assert.ok(siblingControls.textLabels.some((label) => label.includes("妹妹")));
+  assert.ok(siblingControls.textLabels.some((label) => label.includes("孪生弟弟")));
+  assert.ok(siblingControls.textLabels.some((label) => label.includes("孪生妹妹")));
+  assertNoInvalidSvgAttributes(siblingControls);
+  assertNoSymbolOverlaps(siblingControls);
+  assertNoTextSymbolOverlaps(siblingControls);
+  assertNoTextLineOverlaps(siblingControls);
 
   assert.ok(halfSiblings);
   assert.equal(halfSiblings.symbolCount, 5);
@@ -85,6 +112,8 @@ test("browser smoke renders stable pedigree scenarios", async (t) => {
   assert.match(halfSiblings.projectMeta, /5 名成员/);
   assertNoInvalidSvgAttributes(halfSiblings);
   assertNoSymbolOverlaps(halfSiblings);
+  assertNoTextSymbolOverlaps(halfSiblings);
+  assertNoTextLineOverlaps(halfSiblings);
 });
 
 async function runScenario(
@@ -116,7 +145,7 @@ async function runScenario(
 }
 
 async function clickButton(page: Page, name: string) {
-  await page.getByRole("button", { name }).click();
+  await page.getByRole("button", { name, exact: true }).click();
 }
 
 async function collectMetrics(page: Page, name: string): Promise<ScenarioMetrics> {
@@ -150,8 +179,46 @@ async function collectMetrics(page: Page, name: string): Promise<ScenarioMetrics
       generationLabels: [...document.querySelectorAll(".generation-label")].map((element) => element.textContent ?? ""),
       textLabels: [...document.querySelectorAll("text")].map((element) => element.textContent ?? ""),
       symbolRects: [...document.querySelectorAll(".person-symbol")].map(rectOf),
+      textRects: [...document.querySelectorAll(".person-label,.id-label,.meta-label,.diagnosis-label,.proband-label")]
+        .map((element) => ({
+          text: element.textContent ?? "",
+          className: element.getAttribute("class") ?? "",
+          rect: rectOf(element)
+        }))
+        .filter((item) => item.text.trim().length > 0 && item.rect.width > 0 && item.rect.height > 0),
+      relationshipSegments: [...document.querySelectorAll(".marriage-line,.descent-line,.sibling-line,.individual-line,.twin-bar")]
+        .flatMap((element) => relationshipSegments(element)),
       invalidSvgAttributes: attrs.filter((value) => /\\b(?:NaN|Infinity|-Infinity|undefined|null)\\b/.test(value))
     };
+
+    function relationshipSegments(element) {
+      const matrix = element.getScreenCTM();
+      if (!matrix) return [];
+      const className = element.getAttribute("class") ?? "";
+      const toScreen = (x, y) => {
+        const point = element.ownerSVGElement.createSVGPoint();
+        point.x = Number(x);
+        point.y = Number(y);
+        const out = point.matrixTransform(matrix);
+        return { x: round(out.x), y: round(out.y) };
+      };
+      const points = element.tagName.toLowerCase() === "line"
+        ? [
+            toScreen(element.getAttribute("x1"), element.getAttribute("y1")),
+            toScreen(element.getAttribute("x2"), element.getAttribute("y2"))
+          ]
+        : (element.getAttribute("points") ?? "")
+            .trim()
+            .split(/\\s+/)
+            .map((pair) => pair.split(",").map(Number))
+            .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y))
+            .map(([x, y]) => toScreen(x, y));
+      return points.slice(1).map((point, index) => ({
+        className,
+        from: points[index],
+        to: point
+      }));
+    }
   })()`);
 }
 
@@ -171,12 +238,78 @@ function assertNoSymbolOverlaps(metrics: ScenarioMetrics) {
   }
 }
 
-function overlaps(a: RectMetrics, b: RectMetrics) {
-  const inset = 2;
+function assertNoTextSymbolOverlaps(metrics: ScenarioMetrics) {
+  for (const text of metrics.textRects) {
+    for (let i = 0; i < metrics.symbolRects.length; i++) {
+      assert.equal(
+        overlaps(text.rect, metrics.symbolRects[i], 1),
+        false,
+        `${metrics.name} text "${text.text}" overlaps symbol ${i}`
+      );
+    }
+  }
+}
+
+function assertNoTextLineOverlaps(metrics: ScenarioMetrics) {
+  for (const text of metrics.textRects) {
+    for (const segment of metrics.relationshipSegments) {
+      assert.equal(
+        segmentIntersectsRect(segment.from, segment.to, text.rect, -4),
+        false,
+        `${metrics.name} text "${text.text}" overlaps ${segment.className}`
+      );
+    }
+  }
+}
+
+function overlaps(a: RectMetrics, b: RectMetrics, inset = 2) {
   return a.x + inset < b.x + b.width - inset &&
     a.x + a.width - inset > b.x + inset &&
     a.y + inset < b.y + b.height - inset &&
     a.y + a.height - inset > b.y + inset;
+}
+
+function segmentIntersectsRect(from: PointMetrics, to: PointMetrics, rect: RectMetrics, inset = 0) {
+  const left = rect.x + inset;
+  const right = rect.x + rect.width - inset;
+  const top = rect.y + inset;
+  const bottom = rect.y + rect.height - inset;
+  if (right <= left || bottom <= top) return false;
+  if (pointInsideRect(from, left, right, top, bottom) || pointInsideRect(to, left, right, top, bottom)) return true;
+  const edges = [
+    [{ x: left, y: top }, { x: right, y: top }],
+    [{ x: right, y: top }, { x: right, y: bottom }],
+    [{ x: right, y: bottom }, { x: left, y: bottom }],
+    [{ x: left, y: bottom }, { x: left, y: top }]
+  ] as const;
+  return edges.some(([a, b]) => segmentsIntersect(from, to, a, b));
+}
+
+function pointInsideRect(point: PointMetrics, left: number, right: number, top: number, bottom: number) {
+  return point.x >= left && point.x <= right && point.y >= top && point.y <= bottom;
+}
+
+function segmentsIntersect(a: PointMetrics, b: PointMetrics, c: PointMetrics, d: PointMetrics) {
+  const d1 = direction(a, b, c);
+  const d2 = direction(a, b, d);
+  const d3 = direction(c, d, a);
+  const d4 = direction(c, d, b);
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
+    return true;
+  }
+  return d1 === 0 && onSegment(a, b, c) ||
+    d2 === 0 && onSegment(a, b, d) ||
+    d3 === 0 && onSegment(c, d, a) ||
+    d4 === 0 && onSegment(c, d, b);
+}
+
+function direction(a: PointMetrics, b: PointMetrics, c: PointMetrics) {
+  return Math.sign((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x));
+}
+
+function onSegment(a: PointMetrics, b: PointMetrics, c: PointMetrics) {
+  return c.x >= Math.min(a.x, b.x) && c.x <= Math.max(a.x, b.x) &&
+    c.y >= Math.min(a.y, b.y) && c.y <= Math.max(a.y, b.y);
 }
 
 async function startStaticServer(root: string): Promise<StaticServer> {
@@ -254,6 +387,11 @@ interface RectMetrics {
   height: number;
 }
 
+interface PointMetrics {
+  x: number;
+  y: number;
+}
+
 interface ScenarioMetrics {
   name: string;
   title: string;
@@ -268,5 +406,15 @@ interface ScenarioMetrics {
   generationLabels: string[];
   textLabels: string[];
   symbolRects: RectMetrics[];
+  textRects: Array<{
+    text: string;
+    className: string;
+    rect: RectMetrics;
+  }>;
+  relationshipSegments: Array<{
+    className: string;
+    from: PointMetrics;
+    to: PointMetrics;
+  }>;
   invalidSvgAttributes: string[];
 }
