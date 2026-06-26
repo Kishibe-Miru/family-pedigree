@@ -1,7 +1,7 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 5.2
+   精神科遗传家族谱系图绘制工具 5.2.1
    纯前端、本地优先。本版新增：双胞胎（同卵/异卵）、携带者圆点、
    近亲婚配自动双线、拖动自由摆放开关、一键生成家族史文字。
    4.1：连线 T 形修复；新增"与已选成员结婚"连接已有节点为配偶；
@@ -12,11 +12,12 @@
    5.0：显式领域模型：Union / Parentage / Phenotype / GeneticFinding / Layout。
    5.1：建立 graph engine 分层骨架，移除旧 person-person edge 与 tree layout 主体。
    5.2：收敛架构边界：engine 专注布局，浏览器版保留医学渲染；双胞胎进入布局排序约束。
+   5.2.1：补齐简单家庭测试、下沉绕行、文字标注避让与视觉碰撞检查。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "5.2";
+const VERSION = "5.2.1";
 
 // 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
 const PLACEHOLDER_NAMES = new Set([
@@ -32,7 +33,7 @@ function realName(p) {
 const NODE_SIZE = 44;
 const R = NODE_SIZE / 2;
 const PERSON_GAP = NODE_SIZE * 2.7;      // 同代相邻个体中心距
-const GENERATION_GAP = NODE_SIZE * 3.7;  // 代际中心距
+const GENERATION_GAP = NODE_SIZE * 3.45; // 代际中心距
 const SIBSHIP_DROP = NODE_SIZE * 1.25;   // 同胞横线距子女符号顶部
 const LABEL_OFFSET = R + 14;             // 名称距符号中心
 const ID_OFFSET = R + 8;                 // 编号在符号上方

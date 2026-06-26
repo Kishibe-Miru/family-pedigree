@@ -84,7 +84,7 @@ function shouldPlaceOriginLeft(
   const siblings = sortChildren(graph, graph.childrenMap.get(parentUnionId) ?? []);
   const index = siblings.indexOf(mainPersonId);
   if (index < 0) return false;
-  return index < (siblings.length - 1) / 2;
+  return index > (siblings.length - 1) / 2;
 }
 
 function minimizeByMedian(graph: PedigreeGraph, order: GenerationOrder) {

@@ -13,6 +13,8 @@ import { GraphValidationError, validateGraph } from "../rules/validation";
 
 const R = NODE_SIZE / 2;
 const SIBSHIP_DROP = NODE_SIZE * 1.25;
+const ROUTED_MARRIAGE_DROP = NODE_SIZE * 1.65;
+const MIN_PARENT_DROP = NODE_SIZE * 0.65;
 
 export interface FinalizeLayoutPerson {
   id: string;
@@ -244,6 +246,7 @@ function buildRelationshipSegments(
 ): RelationshipSegment[] {
   const segments: RelationshipSegment[] = [];
   const anchors = new Map(unionAnchors.map((anchor) => [anchor.unionId, anchor]));
+  const marriageLines = new Map<string, Array<{ x: number; y: number }>>();
 
   for (const union of graph.unions.values()) {
     const parentIds = [...union.partners];
@@ -256,7 +259,8 @@ function buildRelationshipSegments(
       const [left, right] = partners[0].x <= partners[1].x
         ? [partners[0], partners[1]]
         : [partners[1], partners[0]];
-      const points = marriageLinePoints(graph, left, right, parentIds);
+      const points = marriageLinePoints(graph, left, right, parentIds, childIds);
+      marriageLines.set(union.id, points);
       segments.push({
         id: `${union.id}:marriage`,
         type: "marriage",
@@ -280,15 +284,19 @@ function buildRelationshipSegments(
     if (kids.length === 0 || partners.length === 0) continue;
 
     const anchor = anchors.get(union.id);
-    const dropX = anchor?.x ?? avg(partners.map((person) => person.x));
-    const dropTopY = partners.length === 2
+    const descentStart = marriageDescentStart(marriageLines.get(union.id));
+    const dropX = descentStart?.x ?? anchor?.x ?? avg(partners.map((person) => person.x));
+    const dropTopY = descentStart?.y ?? (partners.length === 2
       ? (anchor?.y ?? avg(partners.map((person) => person.y)))
-      : partners[0].y;
+      : partners[0].y);
     const childTopY = Math.min(...kids.map((kid) => kid.y)) - R;
-    const siblingY = childTopY - SIBSHIP_DROP + R;
+    const defaultSiblingY = childTopY - SIBSHIP_DROP + R;
+    const lowestSiblingY = childTopY - NODE_SIZE * 0.25;
+    const siblingY = Math.min(lowestSiblingY, Math.max(defaultSiblingY, dropTopY + MIN_PARENT_DROP));
     const sortedKids = [...kids].sort((a, b) => a.x - b.x);
     const minKidX = sortedKids[0].x;
     const maxKidX = sortedKids[sortedKids.length - 1].x;
+    const singleChild = kids.length === 1;
 
     segments.push({
       id: `${union.id}:descent`,
@@ -305,7 +313,20 @@ function buildRelationshipSegments(
       points: [{ x: dropX, y: dropTopY }, { x: dropX, y: siblingY }]
     });
 
-    if (kids.length > 1 || Math.abs(kids[0].x - dropX) >= 0.5) {
+    if (singleChild) {
+      segments.push({
+        id: `${union.id}:sibling`,
+        type: "sibling",
+        kind: "sibling-line",
+        unionId: union.id,
+        childIds,
+        source: {
+          unionId: union.id,
+          childIds
+        },
+        points: [{ x: dropX, y: siblingY }, { x: dropX, y: siblingY }]
+      });
+    } else {
       segments.push({
         id: `${union.id}:sibling`,
         type: "sibling",
@@ -389,11 +410,30 @@ function buildRelationshipSegments(
   return applyParentDropDetours(segments);
 }
 
+function marriageDescentStart(points?: Array<{ x: number; y: number }>) {
+  if (!points || points.length < 2) return undefined;
+  const horizontalSegments = [];
+  for (let i = 1; i < points.length; i++) {
+    const previous = points[i - 1];
+    const current = points[i];
+    if (Math.abs(previous.y - current.y) < 0.5) {
+      horizontalSegments.push({ previous, current });
+    }
+  }
+  const segment = horizontalSegments[horizontalSegments.length - 1];
+  if (!segment) return undefined;
+  return {
+    x: (segment.previous.x + segment.current.x) / 2,
+    y: segment.previous.y
+  };
+}
+
 function marriageLinePoints(
   graph: PedigreeGraph,
   left: PersonWithCoordinates,
   right: PersonWithCoordinates,
-  partnerIds: string[]
+  partnerIds: string[],
+  childIds: string[] = []
 ) {
   const start = { x: left.x, y: left.y };
   const end = { x: right.x, y: right.y };
@@ -409,10 +449,23 @@ function marriageLinePoints(
     person.x > start.x &&
     person.x < end.x
   );
-  if (blockers.length === 0) return [start, end];
+  if (blockers.length === 0 && !requiresLoweredChildbearingMarriage(graph, partnerIds, childIds)) return [start, end];
 
-  const routeY = left.y + NODE_SIZE * 2.15;
+  const routeY = left.y + ROUTED_MARRIAGE_DROP;
   return [start, { x: start.x, y: routeY }, { x: end.x, y: routeY }, end];
+}
+
+function requiresLoweredChildbearingMarriage(
+  graph: PedigreeGraph,
+  partnerIds: string[],
+  childIds: string[]
+) {
+  if (childIds.length === 0 || partnerIds.length !== 2) return false;
+  const parentUnionByChild = new Set<string>();
+  for (const ids of graph.childrenMap.values()) {
+    for (const id of ids) parentUnionByChild.add(id);
+  }
+  return partnerIds.every((id) => parentUnionByChild.has(id));
 }
 
 function applyParentDropDetours(segments: RelationshipSegment[]): RelationshipSegment[] {

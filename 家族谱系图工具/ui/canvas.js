@@ -371,16 +371,6 @@ function idLabelPosition(ctx, person, label) {
   const candidates = [{
     side: "left",
     x: person.x - R_UI - 5,
-    y: sideY,
-    rect: { minX: person.x - R_UI - 5 - width, maxX: person.x - R_UI - 5, minY: sideY, maxY: sideY + 14 }
-  }, {
-    side: "right",
-    x: person.x + R_UI + 5,
-    y: sideY,
-    rect: { minX: person.x + R_UI + 5, maxX: person.x + R_UI + 5 + width, minY: sideY, maxY: sideY + 14 }
-  }, {
-    side: "left",
-    x: person.x - R_UI - 5,
     y: aboveY,
     rect: { minX: person.x - R_UI - 5 - width, maxX: person.x - R_UI - 5, minY: aboveY, maxY: aboveY + 14 }
   }, {
@@ -388,6 +378,16 @@ function idLabelPosition(ctx, person, label) {
     x: person.x + R_UI + 5,
     y: aboveY,
     rect: { minX: person.x + R_UI + 5, maxX: person.x + R_UI + 5 + width, minY: aboveY, maxY: aboveY + 14 }
+  }, {
+    side: "left",
+    x: person.x - R_UI - 5,
+    y: sideY,
+    rect: { minX: person.x - R_UI - 5 - width, maxX: person.x - R_UI - 5, minY: sideY, maxY: sideY + 14 }
+  }, {
+    side: "right",
+    x: person.x + R_UI + 5,
+    y: sideY,
+    rect: { minX: person.x + R_UI + 5, maxX: person.x + R_UI + 5 + width, minY: sideY, maxY: sideY + 14 }
   }];
   return candidates.find((candidate) => !labelRectOverlapsVisual(ctx, candidate.rect, person.id)) ?? candidates[0];
 }

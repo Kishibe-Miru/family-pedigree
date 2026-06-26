@@ -127,7 +127,7 @@
     const siblings = sortChildren(graph, graph.childrenMap.get(parentUnionId) ?? []);
     const index = siblings.indexOf(mainPersonId);
     if (index < 0) return false;
-    return index < (siblings.length - 1) / 2;
+    return index > (siblings.length - 1) / 2;
   }
   function minimizeByMedian(graph, order) {
     for (let i = 0; i < 8; i++) {
@@ -367,10 +367,11 @@
   var SLOT = PERSON_GAP;
   var BASE_MARRIAGE_GAP = NODE_SIZE * 2.1;
   var BRANCHED_MARRIAGE_GAP = NODE_SIZE * 2.25;
+  var DUAL_ORIGIN_MARRIAGE_GAP = BRANCHED_MARRIAGE_GAP + NODE_SIZE * 1.45;
   var MARRIAGE_GAP = BRANCHED_MARRIAGE_GAP;
   var SIBLING_GAP = PERSON_GAP;
   var MIN_GAP = NODE_SIZE * 0.8;
-  var GENERATION_GAP = NODE_SIZE * 3.7;
+  var GENERATION_GAP = NODE_SIZE * 3.45;
   function createPersonBox(personId, generation) {
     return {
       kind: "person",
@@ -620,8 +621,9 @@
       if (!shared || !parentUnion || !Number.isFinite(shared.x)) {
         throw new Error(`layout invariant failed: origin spouse drift for ${link.sharedPersonId}`);
       }
+      const originChildren = graph.childrenMap.get(parentUnion.id) ?? [];
       const parentMid = parentDropX(graph, parentUnion);
-      if (parentMid == null || Math.abs((shared.x ?? 0) - parentMid) >= 0.5) {
+      if (originChildren.length <= 1 && (parentMid == null || Math.abs((shared.x ?? 0) - parentMid) >= 0.5)) {
         throw new Error(`layout invariant failed: origin spouse drift for ${link.sharedPersonId}`);
       }
       const parentGenerations = parentUnion.partners.map((partnerId) => graph.persons.get(partnerId)?.generation).filter((generation) => generation != null);
@@ -683,12 +685,26 @@
     }
   }
   function assertGenerationYConsistency(graph) {
+    const yByGeneration = /* @__PURE__ */ new Map();
     for (const person of graph.persons.values()) {
       if (!Number.isFinite(person.y)) continue;
       const generation = person.generation ?? 0;
-      const expectedY = generation * GENERATION_GAP;
-      if (Math.abs((person.y ?? 0) - expectedY) >= 0.5) {
+      const existingY = yByGeneration.get(generation);
+      if (existingY == null) {
+        yByGeneration.set(generation, person.y ?? 0);
+        continue;
+      }
+      if (Math.abs((person.y ?? 0) - existingY) >= 0.5) {
         throw new Error(`layout invariant failed: generation y mismatch ${person.id}`);
+      }
+    }
+    const generations = [...yByGeneration.keys()].sort((a, b) => a - b);
+    for (let i = 1; i < generations.length; i++) {
+      const previousY = yByGeneration.get(generations[i - 1]) ?? 0;
+      const currentY = yByGeneration.get(generations[i]) ?? 0;
+      const generationSteps = generations[i] - generations[i - 1];
+      if (currentY - previousY < generationSteps * GENERATION_GAP - 0.5) {
+        throw new Error(`layout invariant failed: generation y gap too small ${generations[i]}`);
       }
     }
   }
@@ -717,8 +733,7 @@
       const isRootUnion = union.partners.every((partnerId) => !parentUnionForChild(graph, partnerId));
       if (!isOriginUnion && !isRootUnion) continue;
       const dropX = parentDropX(graph, union);
-      const originChildId = originChildByParentUnion.get(unionId);
-      const childCenter = originChildId ? graph.persons.get(originChildId)?.x : childrenCenterX(graph, childIds);
+      const childCenter = childrenCenterX(graph, childIds);
       if (dropX == null || childCenter == null || Math.abs(dropX - childCenter) >= 0.5) {
         throw new Error(`layout invariant failed: parent drop not centered over children for ${unionId}`);
       }
@@ -836,6 +851,9 @@
     return { roots, originLinks };
   }
   function marriageGapForUnion(graph, parentUnionByChild, union, originOf) {
+    if (union.partners.length === 2 && union.partners.every((partnerId) => parentUnionByChild.has(partnerId))) {
+      return DUAL_ORIGIN_MARRIAGE_GAP;
+    }
     const hasChildren = (graph.childrenMap.get(union.id) ?? []).length > 0;
     const hasOriginPartner = !!originOf || union.partners.some((partnerId) => parentUnionByChild.has(partnerId));
     return hasChildren || hasOriginPartner ? BRANCHED_MARRIAGE_GAP : BASE_MARRIAGE_GAP;
@@ -850,7 +868,7 @@
     const siblings = sortedChildren(graph, parentUnionId);
     const index = siblings.indexOf(mainPersonId);
     if (index < 0) return false;
-    return index < (siblings.length - 1) / 2;
+    return index > (siblings.length - 1) / 2;
   }
   function containsMember(box, memberId) {
     if (box.members.includes(memberId)) return true;
@@ -1150,6 +1168,10 @@
   // src/layout/coordinateSolver.ts
   var SYMBOL_MARGIN = NODE_SIZE * 0.3;
   var SYMBOL_CENTER_GAP = NODE_SIZE + SYMBOL_MARGIN;
+  var SIBLING_EDGE_GAP = PERSON_GAP - NODE_SIZE;
+  var ROUTED_MARRIAGE_DROP = NODE_SIZE * 1.65;
+  var MIN_PARENT_DROP = NODE_SIZE * 0.65;
+  var SIBSHIP_DROP = NODE_SIZE * 1.25;
   function measureBox(box) {
     if (box.kind === "person") {
       box.width = SLOT;
@@ -1179,11 +1201,11 @@
       if (box.top) placeBox(box.top, centerX);
       return;
     }
-    const childrenW = box._childrenW ?? 0;
+    const childrenW = siblingRowWidth(children);
     let left = centerX - childrenW / 2;
     for (const child of children) {
-      placeBox(child, left + child.width / 2);
-      left += child.width + SIBLING_GAP;
+      placeBoxAtSiblingRowLeft(child, left);
+      left += siblingRowBoxWidth(child) + SIBLING_EDGE_GAP;
     }
     const dropX = familyDropX(box);
     if (box.top) placeBox(box.top, dropX);
@@ -1198,7 +1220,7 @@
   function reconcileOrigins(roots, originLinks) {
     let changed = reconcileOriginRounds(roots, originLinks);
     for (const link of originLinks) {
-      changed = alignOriginLink(link) || changed;
+      changed = alignOriginLink(link, roots) || changed;
     }
     return changed;
   }
@@ -1207,16 +1229,16 @@
     for (let i = 0; i < 64; i++) {
       let roundChanged = false;
       for (const link of originLinks) {
-        roundChanged = alignOriginLink(link) || roundChanged;
+        roundChanged = alignOriginLink(link, roots) || roundChanged;
       }
       changed = changed || roundChanged;
       if (!roundChanged) break;
     }
     return changed;
   }
-  function alignOriginLink(link) {
+  function alignOriginLink(link, roots) {
     let changed = false;
-    const targetX = link.couple.anchorX(link.sharedPersonId);
+    const targetX = originLinkTargetX(link, roots);
     const currentX = memberAnchorX(link.originRoot, link.sharedPersonId);
     if (currentX != null) {
       const dx = targetX - currentX;
@@ -1230,6 +1252,81 @@
       throw new Error(`layout invariant failed: origin link generation mismatch for ${link.sharedPersonId}`);
     }
     return changed;
+  }
+  function originLinkTargetX(link, roots) {
+    if (link.couple.originOf !== link.sharedPersonId) return link.couple.anchorX(link.sharedPersonId);
+    const mainPersonId = link.couple.mainPersonId;
+    if (!mainPersonId) return link.couple.anchorX(link.sharedPersonId);
+    const linkFamily = nearestFamilyForTop(roots, link.couple);
+    const sourceFamily = parentFamilyForChildBox(roots, linkFamily);
+    if (!sourceFamily?.children || sourceFamily.children.length <= 1) return link.couple.anchorX(link.sharedPersonId);
+    const mainX = link.couple.anchorX(mainPersonId);
+    const shadowX = link.couple.anchorX(link.sharedPersonId);
+    const currentX = memberAnchorX(link.originRoot, link.sharedPersonId) ?? link.couple.anchorX(link.sharedPersonId);
+    const mainIndex = link.couple.members.indexOf(mainPersonId);
+    const sharedIndex = link.couple.members.indexOf(link.sharedPersonId);
+    const placeRight = sharedIndex >= 0 && mainIndex >= 0 ? sharedIndex > mainIndex : shadowX >= mainX;
+    const rowBounds = sourceFamily.children.map((child) => siblingRowBounds(child));
+    const sourceBoundsByGeneration = generationSymbolBounds(sourceFamily);
+    const originBoundsByGeneration = generationSymbolBounds(link.originRoot);
+    const outwardDx = originOutwardShift(sourceBoundsByGeneration, originBoundsByGeneration, placeRight);
+    if (placeRight) {
+      const right = Math.max(...rowBounds.map((bounds) => bounds.right));
+      const anchorDx2 = right + SIBLING_EDGE_GAP + NODE_SIZE / 2 - currentX;
+      return currentX + Math.max(0, anchorDx2, outwardDx);
+    }
+    const left = Math.min(...rowBounds.map((bounds) => bounds.left));
+    const anchorDx = left - SIBLING_EDGE_GAP - NODE_SIZE / 2 - currentX;
+    return currentX + Math.min(0, anchorDx, outwardDx);
+  }
+  function generationSymbolBounds(box) {
+    const bounds = /* @__PURE__ */ new Map();
+    const add = (gen, left, right) => {
+      const existing = bounds.get(gen);
+      bounds.set(gen, existing ? { left: Math.min(existing.left, left), right: Math.max(existing.right, right) } : { left, right });
+    };
+    const visit = (current) => {
+      if (current.kind === "family") {
+        if (current.top) visit(current.top);
+        current.children?.forEach(visit);
+        return;
+      }
+      for (const id of current.members) {
+        if (current.kind === "couple" && current.originOf === id) continue;
+        const x = current.anchorX(id);
+        add(current.gen, x - NODE_SIZE / 2, x + NODE_SIZE / 2);
+      }
+    };
+    visit(box);
+    return bounds;
+  }
+  function originOutwardShift(sourceBoundsByGeneration, originBoundsByGeneration, placeRight) {
+    let dx = 0;
+    for (const [gen, source] of sourceBoundsByGeneration.entries()) {
+      const origin = originBoundsByGeneration.get(gen);
+      if (!origin) continue;
+      if (placeRight) {
+        dx = Math.max(dx, source.right + SIBLING_EDGE_GAP - origin.left);
+      } else {
+        dx = Math.min(dx, source.left - SIBLING_EDGE_GAP - origin.right);
+      }
+    }
+    return dx;
+  }
+  function parentFamilyForChildBox(roots, target) {
+    if (!target) return null;
+    let parent = null;
+    const visit = (box) => {
+      if (parent || box.kind !== "family") return;
+      if ((box.children ?? []).includes(target)) {
+        parent = box;
+        return;
+      }
+      box.top && visit(box.top);
+      box.children?.forEach(visit);
+    };
+    roots.forEach(visit);
+    return parent;
   }
   function resolveGenerationOverlaps(roots, pinnedMovers = /* @__PURE__ */ new Set()) {
     let changed = false;
@@ -1339,13 +1436,38 @@
     return anchorMember ? box.anchorX(anchorMember) : box.cx;
   }
   function siblingAnchorGap(previous, current) {
-    if (!requiresSiblingFamilySpace(previous) && !requiresSiblingFamilySpace(current)) return PERSON_GAP;
-    const previousRight = rightOf(previous) - primaryAnchorX(previous);
-    const currentLeft = primaryAnchorX(current) - leftOf(current);
-    return Math.max(PERSON_GAP, previousRight + MIN_GAP + currentLeft);
+    const previousRight = siblingRowRight(previous) - primaryAnchorX(previous);
+    const currentLeft = primaryAnchorX(current) - siblingRowLeft(current);
+    return previousRight + SIBLING_EDGE_GAP + currentLeft;
   }
-  function requiresSiblingFamilySpace(box) {
-    return box.kind === "family";
+  function siblingRowWidth(children) {
+    return children.reduce((sum, child, index) => sum + siblingRowBoxWidth(child) + (index === 0 ? 0 : SIBLING_EDGE_GAP), 0);
+  }
+  function placeBoxAtSiblingRowLeft(box, targetLeft) {
+    placeBox(box, targetLeft + box.width / 2);
+    shiftSubtree(box, targetLeft - siblingRowLeft(box));
+  }
+  function siblingRowBoxWidth(box) {
+    return siblingRowRight(box) - siblingRowLeft(box);
+  }
+  function siblingRowLeft(box) {
+    return siblingRowBounds(box).left;
+  }
+  function siblingRowRight(box) {
+    return siblingRowBounds(box).right;
+  }
+  function siblingRowBounds(box) {
+    const rowBox = box.kind === "family" && box.top ? box.top : box;
+    if (rowBox.kind === "couple") {
+      if (rowBox.originOf && rowBox.mainPersonId) {
+        const anchor2 = rowBox.anchorX(rowBox.mainPersonId);
+        return { left: anchor2 - NODE_SIZE / 2, right: anchor2 + NODE_SIZE / 2 };
+      }
+      const xs = rowBox.members.map((id) => rowBox.anchorX(id));
+      return { left: Math.min(...xs) - NODE_SIZE / 2, right: Math.max(...xs) + NODE_SIZE / 2 };
+    }
+    const anchor = primaryAnchorX(rowBox);
+    return { left: anchor - NODE_SIZE / 2, right: anchor + NODE_SIZE / 2 };
   }
   function assertFamilyAnchors(box, expectedDropX) {
     if (!box.top || !box.children || box.children.length === 0) return;
@@ -1418,6 +1540,8 @@
     compactWideGraphCoordinates(graph, layoutPlan);
     iterateGraphRelationshipAlignment(graph, originLinks, layoutPlan);
     settleFinalGraphCoordinateRepairs(graph, originLinks, layoutPlan);
+    compactWideGraphCoordinates(graph, layoutPlan);
+    enforceGraphFamilyPrimitiveIntegrity(graph, originLinks, layoutPlan);
   }
   function iterateGraphRelationshipAlignment(graph, originLinks, layoutPlan) {
     for (let i = 0; i < 24; i++) {
@@ -1433,13 +1557,46 @@
   function settleFinalGraphCoordinateRepairs(graph, originLinks, layoutPlan) {
     settleGraphRelationshipConstraints(graph, originLinks, layoutPlan);
     repairGraphOriginOverlaps(graph, originLinks);
+    repairGraphExternalOriginRouteConflicts(graph, originLinks);
+    repairGraphMarriageGaps(graph);
     settleGraphParentAndSiblingConstraints(graph, originLinks, layoutPlan);
     repairGraphSymbolOverlaps(graph);
+    repairGraphExternalOriginRouteConflicts(graph, originLinks);
+    repairGraphMarriageGaps(graph);
     settleGraphOriginAndSiblingConstraints(graph, originLinks, layoutPlan);
     settleGraphParentDropConstraints(graph, originLinks, layoutPlan);
+    alignGraphSingleChildrenToParentDrops(graph);
     repairGraphSymbolOverlaps(graph);
+    repairGraphExternalOriginRouteConflicts(graph, originLinks);
+    repairGraphMarriageGaps(graph);
     alignGraphOriginMarriagesSafely(graph, originLinks);
+    alignGraphSingleChildrenToParentDrops(graph);
+    repairGraphOriginAdjacencyGaps(graph, originLinks);
+    for (let i = 0; i < 8; i++) {
+      settleGraphParentDropConstraints(graph, originLinks, layoutPlan);
+      repairGraphSymbolOverlaps(graph);
+      repairGraphOriginOverlaps(graph, originLinks);
+      repairGraphExternalOriginRouteConflicts(graph, originLinks);
+      repairGraphMarriageGaps(graph);
+    }
+    repairGraphOriginOverlaps(graph, originLinks);
+    repairGraphExternalOriginRouteConflicts(graph, originLinks);
+    repairGraphMarriageGaps(graph);
+    settleGraphParentDropConstraints(graph, originLinks, layoutPlan);
     repairGraphSymbolOverlaps(graph);
+    repairGraphMarriageGaps(graph);
+    settleGraphParentDropConstraints(graph, originLinks, layoutPlan);
+    enforceGraphFamilyPrimitiveIntegrity(graph, originLinks, layoutPlan);
+  }
+  function enforceGraphFamilyPrimitiveIntegrity(graph, originLinks, layoutPlan) {
+    for (let i = 0; i < 6; i++) {
+      settleGraphParentDropConstraints(graph, originLinks, layoutPlan);
+      alignGraphSingleChildrenToParentDrops(graph);
+      repairGraphSymbolOverlaps(graph);
+      repairGraphOriginOverlaps(graph, originLinks);
+      repairGraphExternalOriginRouteConflicts(graph, originLinks);
+      repairGraphMarriageGaps(graph);
+    }
   }
   function settleGraphRelationshipConstraints(graph, originLinks, layoutPlan) {
     applyGraphRelationshipConstraints(graph, originLinks, layoutPlan);
@@ -1475,16 +1632,88 @@
     for (const siblingGroup of layoutPlan.siblingGroups) {
       const sorted = siblingGroup.orderedChildIds;
       for (let i = 1; i < sorted.length; i++) {
-        const previous = graph.persons.get(sorted[i - 1]);
-        const current = graph.persons.get(sorted[i]);
-        if (!previous || !current || !Number.isFinite(previous.x) || !Number.isFinite(current.x)) continue;
-        const need = (previous.x ?? 0) + NODE_SIZE - (current.x ?? 0);
-        if (need <= 0) continue;
-        current.x = (current.x ?? 0) + need;
+        const previousBounds = graphSiblingRowBounds(graph, sorted[i - 1], siblingGroup.orderedChildIds, layoutPlan);
+        const currentBounds = graphSiblingRowBounds(graph, sorted[i], siblingGroup.orderedChildIds, layoutPlan);
+        if (!previousBounds || !currentBounds) continue;
+        const dx = previousBounds.right + SIBLING_EDGE_GAP - currentBounds.left;
+        if (Math.abs(dx) < 0.5) continue;
+        shiftGraphPersons(graph, graphSiblingRowOccupantIds(graph, sorted[i], siblingGroup.orderedChildIds, layoutPlan), dx);
         changed = true;
       }
     }
     return changed;
+  }
+  function graphSiblingRowBounds(graph, childId, siblingIds, layoutPlan) {
+    const xs = [...graphSiblingRowOccupantIds(graph, childId, siblingIds, layoutPlan)].map((id) => graph.persons.get(id)?.x).filter((x) => Number.isFinite(x));
+    if (xs.length === 0) return void 0;
+    return {
+      left: Math.min(...xs) - NODE_SIZE / 2,
+      right: Math.max(...xs) + NODE_SIZE / 2
+    };
+  }
+  function graphSiblingRowOccupantIds(graph, childId, siblingIds, layoutPlan) {
+    const ids = /* @__PURE__ */ new Set([childId]);
+    const siblingSet = new Set(siblingIds);
+    const child = graph.persons.get(childId);
+    if (!child) return ids;
+    for (const union of graph.unions.values()) {
+      if (union.partners.length !== 2 || !union.partners.includes(childId)) continue;
+      if ((graph.childrenMap.get(union.id) ?? []).length === 0) continue;
+      if (marriageRoutesOutsideSiblingRow(graph, union, childId, siblingSet)) continue;
+      for (const partnerId of union.partners) {
+        if (partnerId === childId || siblingSet.has(partnerId)) continue;
+        if (belongsToMultiSiblingGroup(layoutPlan, partnerId)) continue;
+        const partner = graph.persons.get(partnerId);
+        if (!partner || (partner.generation ?? 0) !== (child.generation ?? 0)) continue;
+        ids.add(partnerId);
+      }
+    }
+    return ids;
+  }
+  function marriageRoutesOutsideSiblingRow(graph, union, childId, siblingSet) {
+    const partnerId = union.partners.find((id) => id !== childId);
+    if (!partnerId) return false;
+    const child = graph.persons.get(childId);
+    const partner = graph.persons.get(partnerId);
+    if (!child || !partner) return false;
+    if ((child.generation ?? 0) !== (partner.generation ?? 0)) return false;
+    if (!Number.isFinite(child.x) || !Number.isFinite(partner.x)) return false;
+    const parentUnionByChild = buildGraphParentUnionByChild(graph);
+    const partnerOriginUnionId = parentUnionByChild.get(partnerId);
+    if (partnerOriginUnionId) return true;
+    return hasSameGenerationSiblingBetween(graph, childId, partnerId, siblingSet);
+  }
+  function hasSameGenerationSiblingBetween(graph, childId, partnerId, siblingSet) {
+    const child = graph.persons.get(childId);
+    const partner = graph.persons.get(partnerId);
+    if (!child || !partner) return false;
+    const left = Math.min(child.x ?? 0, partner.x ?? 0);
+    const right = Math.max(child.x ?? 0, partner.x ?? 0);
+    return [...siblingSet].some((id) => {
+      if (id === childId || id === partnerId) return false;
+      const sibling = graph.persons.get(id);
+      if (!sibling || (sibling.generation ?? 0) !== (child.generation ?? 0)) return false;
+      const x = sibling.x ?? Number.NaN;
+      return Number.isFinite(x) && x > left && x < right;
+    });
+  }
+  function buildGraphParentUnionByChild(graph) {
+    const parentUnionByChild = /* @__PURE__ */ new Map();
+    for (const [unionId, childIds] of graph.childrenMap.entries()) {
+      for (const id of childIds) parentUnionByChild.set(id, unionId);
+    }
+    return parentUnionByChild;
+  }
+  function belongsToMultiSiblingGroup(layoutPlan, personId) {
+    return layoutPlan.siblingGroups.some(
+      (group) => group.orderedChildIds.length > 1 && group.orderedChildIds.includes(personId)
+    );
+  }
+  function shiftGraphPersons(graph, ids, dx) {
+    for (const id of ids) {
+      const person = graph.persons.get(id);
+      if (person && Number.isFinite(person.x)) person.x = (person.x ?? 0) + dx;
+    }
   }
   function repairGraphSymbolOverlaps(graph) {
     for (let pass = 0; pass < 80; pass++) {
@@ -1496,12 +1725,177 @@
         if ((previous.generation ?? 0) !== (current.generation ?? 0)) continue;
         const need = (previous.x ?? 0) + NODE_SIZE - (current.x ?? 0);
         if (need <= 0) continue;
-        current.x = (current.x ?? 0) + need;
+        shiftGraphPersonWithSameGenerationPartners(graph, current.id, need);
         changed = true;
         break;
       }
       if (!changed) break;
     }
+  }
+  function repairGraphMarriageGaps(graph) {
+    let anyChanged = false;
+    for (let pass = 0; pass < 80; pass++) {
+      let changed = false;
+      const unions = [...graph.unions.values()].filter((union) => union.partners.length === 2).sort((a, b) => a.id.localeCompare(b.id));
+      for (const union of unions) {
+        const [leftId, rightId] = union.partners;
+        if (!leftId || !rightId) continue;
+        const left = graph.persons.get(leftId);
+        const right = graph.persons.get(rightId);
+        if (!left || !right || !Number.isFinite(left.x) || !Number.isFinite(right.x)) continue;
+        if ((left.generation ?? 0) !== (right.generation ?? 0)) continue;
+        const gap = Math.abs((right.x ?? 0) - (left.x ?? 0));
+        const minGap = marriageGapForGraphUnion(graph, union);
+        const need = minGap - gap;
+        if (need <= 0.5) continue;
+        const moveRight = (right.x ?? 0) >= (left.x ?? 0);
+        const targetId = moveRight ? rightId : leftId;
+        const fixedId = moveRight ? leftId : rightId;
+        shiftGraphPersonWithSameGenerationPartners(graph, targetId, moveRight ? need : -need, /* @__PURE__ */ new Set([fixedId]));
+        changed = true;
+        anyChanged = true;
+        break;
+      }
+      if (!changed) break;
+    }
+    return anyChanged;
+  }
+  function shiftGraphPersonWithSameGenerationPartners(graph, personId, dx, excludedIds = /* @__PURE__ */ new Set()) {
+    const person = graph.persons.get(personId);
+    if (!person || !Number.isFinite(person.x)) return;
+    const ids = /* @__PURE__ */ new Set([personId]);
+    for (const union of graph.unions.values()) {
+      if (!union.partners.includes(personId)) continue;
+      for (const partnerId of union.partners) {
+        if (excludedIds.has(partnerId)) continue;
+        const partner = graph.persons.get(partnerId);
+        if (partner && (partner.generation ?? 0) === (person.generation ?? 0)) ids.add(partnerId);
+      }
+    }
+    shiftGraphPersons(graph, ids, dx);
+  }
+  function repairGraphOriginAdjacencyGaps(graph, originLinks) {
+    const originSetByPerson = /* @__PURE__ */ new Map();
+    for (const link of originLinks) {
+      const ids = collectMemberIds(link.originRoot);
+      for (const id of ids) originSetByPerson.set(id, ids);
+    }
+    let anyChanged = false;
+    for (let pass = 0; pass < 80; pass++) {
+      const people = [...graph.persons.values()].filter((person) => Number.isFinite(person.x) && Number.isFinite(person.y)).sort((a, b) => (a.generation ?? 0) - (b.generation ?? 0) || (a.x ?? 0) - (b.x ?? 0));
+      let changed = false;
+      for (let i = 1; i < people.length; i++) {
+        const previous = people[i - 1];
+        const current = people[i];
+        if ((previous.generation ?? 0) !== (current.generation ?? 0)) continue;
+        if (graphMarriagePartners(graph, previous.id, current.id)) continue;
+        const previousOriginSet = originSetByPerson.get(previous.id);
+        const currentOriginSet = originSetByPerson.get(current.id);
+        if (!previousOriginSet && !currentOriginSet) continue;
+        if (previousOriginSet && currentOriginSet) continue;
+        if ((previous.generation ?? 0) <= 0) continue;
+        const need = (previous.x ?? 0) + PERSON_GAP - (current.x ?? 0);
+        if (need <= 0.5) continue;
+        const moveSet = currentOriginSet ?? previousOriginSet;
+        const dx = currentOriginSet ? need : -need;
+        if (!moveSet) continue;
+        const generation = previousOriginSet ? previous.generation ?? 0 : current.generation ?? 0;
+        if (countOriginMembersInGeneration(graph, moveSet, generation) !== 1) continue;
+        for (const id of moveSet) {
+          const person = graph.persons.get(id);
+          if (person && Number.isFinite(person.x)) person.x = (person.x ?? 0) + dx;
+        }
+        changed = true;
+        anyChanged = true;
+        break;
+      }
+      if (!changed) break;
+    }
+    return anyChanged;
+  }
+  function repairGraphExternalOriginRouteConflicts(graph, originLinks) {
+    const parentUnionByChild = buildGraphParentUnionByChild(graph);
+    const allOriginIds = /* @__PURE__ */ new Set();
+    for (const link of originLinks) {
+      for (const id of collectMemberIds(link.originRoot)) allOriginIds.add(id);
+    }
+    let anyChanged = false;
+    for (let pass = 0; pass < 80; pass++) {
+      let changed = false;
+      for (const link of originLinks) {
+        if (!directOriginMarriageRouteWouldConflict(graph, link)) continue;
+        const mainPersonId = link.couple.mainPersonId;
+        if (!mainPersonId) continue;
+        const sourceUnionId = parentUnionByChild.get(mainPersonId);
+        if (!sourceUnionId) continue;
+        const originIds = collectMemberIds(link.originRoot);
+        const sourceIds = collectGraphSourceRouteIds(graph, sourceUnionId, allOriginIds);
+        const sourceBounds = graphGenerationBounds(graph, sourceIds);
+        const originBounds = graphGenerationBounds(graph, originIds);
+        const dx = graphExternalOriginShift(link, sourceBounds, originBounds);
+        if (Math.abs(dx) <= 0.5) continue;
+        shiftGraphPersons(graph, originIds, dx);
+        changed = true;
+        anyChanged = true;
+        break;
+      }
+      if (!changed) break;
+    }
+    return anyChanged;
+  }
+  function collectGraphSourceRouteIds(graph, sourceUnionId, excludedIds) {
+    const ids = /* @__PURE__ */ new Set();
+    const enqueue = (id) => {
+      if (excludedIds.has(id) || ids.has(id)) return;
+      ids.add(id);
+    };
+    const sourceUnion = graph.unions.get(sourceUnionId);
+    sourceUnion?.partners.forEach(enqueue);
+    (graph.childrenMap.get(sourceUnionId) ?? []).forEach(enqueue);
+    return ids;
+  }
+  function graphGenerationBounds(graph, ids) {
+    const bounds = /* @__PURE__ */ new Map();
+    for (const id of ids) {
+      const person = graph.persons.get(id);
+      if (!person || !Number.isFinite(person.x)) continue;
+      const gen = person.generation ?? 0;
+      const left = (person.x ?? 0) - NODE_SIZE / 2;
+      const right = (person.x ?? 0) + NODE_SIZE / 2;
+      const existing = bounds.get(gen);
+      bounds.set(gen, existing ? { left: Math.min(existing.left, left), right: Math.max(existing.right, right) } : { left, right });
+    }
+    return bounds;
+  }
+  function graphExternalOriginShift(link, sourceBounds, originBounds) {
+    const placeRight = graphExternalOriginPlacedRight(link);
+    let dx = 0;
+    for (const [gen, source] of sourceBounds.entries()) {
+      const origin = originBounds.get(gen);
+      if (!origin) continue;
+      if (placeRight) {
+        dx = Math.max(dx, source.right + SIBLING_EDGE_GAP - origin.left);
+      } else {
+        dx = Math.min(dx, source.left - SIBLING_EDGE_GAP - origin.right);
+      }
+    }
+    return dx;
+  }
+  function graphExternalOriginPlacedRight(link) {
+    const mainPersonId = link.couple.mainPersonId;
+    if (!mainPersonId) return true;
+    const mainIndex = link.couple.members.indexOf(mainPersonId);
+    const sharedIndex = link.couple.members.indexOf(link.sharedPersonId);
+    if (mainIndex >= 0 && sharedIndex >= 0) return sharedIndex > mainIndex;
+    return link.couple.anchorX(link.sharedPersonId) >= link.couple.anchorX(mainPersonId);
+  }
+  function countOriginMembersInGeneration(graph, ids, generation) {
+    return [...ids].filter((id) => (graph.persons.get(id)?.generation ?? 0) === generation).length;
+  }
+  function graphMarriagePartners(graph, leftId, rightId) {
+    return [...graph.unions.values()].some(
+      (union) => union.partners.length === 2 && union.partners.includes(leftId) && union.partners.includes(rightId)
+    );
   }
   function alignGraphParentDrops(graph, originLinks = [], layoutPlan) {
     let changed = false;
@@ -1536,8 +1930,7 @@
       if (childIds.length === 0) continue;
       const union = graph.unions.get(unionId);
       if (!union) continue;
-      const originChildId = originChildByParentUnion.get(unionId);
-      const childXs = (originChildId ? [originChildId] : childIds).map((childId) => graph.persons.get(childId)?.x).filter((x) => Number.isFinite(x));
+      const childXs = childIds.map((childId) => graph.persons.get(childId)?.x).filter((x) => Number.isFinite(x));
       if (childXs.length === 0) continue;
       const childCenter = childXs.length === 1 ? childXs[0] : (Math.min(...childXs) + Math.max(...childXs)) / 2;
       const parentXs = union.partners.map((partnerId) => graph.persons.get(partnerId)?.x).filter((x) => Number.isFinite(x));
@@ -1605,11 +1998,30 @@
     const xs = partnerIds.map((partnerId) => graph.persons.get(partnerId)?.x).filter((x) => Number.isFinite(x));
     return xs.reduce((sum, x) => sum + x, 0) / xs.length;
   }
+  function alignGraphSingleChildrenToParentDrops(graph) {
+    let changed = false;
+    for (const [unionId, childIds] of graph.childrenMap.entries()) {
+      if (childIds.length !== 1) continue;
+      const union = graph.unions.get(unionId);
+      const child = graph.persons.get(childIds[0]);
+      if (!union || !child || !Number.isFinite(child.x)) continue;
+      const parentXs = union.partners.map((partnerId) => graph.persons.get(partnerId)?.x).filter((x) => Number.isFinite(x));
+      if (parentXs.length === 0) continue;
+      const dropX = parentXs.reduce((sum, x) => sum + x, 0) / parentXs.length;
+      if (Math.abs((child.x ?? 0) - dropX) < 0.5) continue;
+      child.x = dropX;
+      changed = true;
+    }
+    return changed;
+  }
   function marriageGapForGraphUnion(graph, union) {
     const hasChildren = (graph.childrenMap.get(union.id) ?? []).length > 0;
     const parentUnionByChild = /* @__PURE__ */ new Set();
     for (const childIds of graph.childrenMap.values()) {
       for (const childId of childIds) parentUnionByChild.add(childId);
+    }
+    if (union.partners.length === 2 && union.partners.every((partnerId) => parentUnionByChild.has(partnerId))) {
+      return DUAL_ORIGIN_MARRIAGE_GAP;
     }
     const hasOriginPartner = union.partners.some((partnerId) => parentUnionByChild.has(partnerId));
     return hasChildren || hasOriginPartner ? BRANCHED_MARRIAGE_GAP : BASE_MARRIAGE_GAP;
@@ -1643,6 +2055,7 @@
   }
   function alignGraphOriginMarriagesSafely(graph, originLinks) {
     for (const link of originLinks) {
+      if (directOriginMarriageRouteWouldConflict(graph, link)) continue;
       const shared = graph.persons.get(link.sharedPersonId);
       const otherId = link.couple.members.find((id) => id !== link.sharedPersonId);
       const other = otherId ? graph.persons.get(otherId) : void 0;
@@ -1668,6 +2081,27 @@
       }
     }
   }
+  function directOriginMarriageRouteWouldConflict(graph, link) {
+    if (link.couple.originOf !== link.sharedPersonId) return false;
+    const mainPersonId = link.couple.mainPersonId;
+    if (!mainPersonId) return false;
+    const parentUnionByChild = buildGraphParentUnionByChild(graph);
+    const sourceUnionId = parentUnionByChild.get(mainPersonId);
+    const originUnionId = parentUnionByChild.get(link.sharedPersonId);
+    if (!sourceUnionId || !originUnionId) return false;
+    const sourceChildren = graph.childrenMap.get(sourceUnionId) ?? [];
+    if (sourceChildren.length > 1) return true;
+    const source = graph.persons.get(mainPersonId);
+    const shared = graph.persons.get(link.sharedPersonId);
+    if (!source || !shared || !Number.isFinite(source.x) || !Number.isFinite(shared.x)) return false;
+    if ((source.generation ?? 0) !== (shared.generation ?? 0)) return false;
+    return hasSameGenerationSiblingBetween(
+      graph,
+      mainPersonId,
+      link.sharedPersonId,
+      new Set(sourceChildren)
+    );
+  }
   function hasGraphSymbolOverlap(graph) {
     const people = [...graph.persons.values()].filter(
       (person) => Number.isFinite(person.x) && Number.isFinite(person.y)
@@ -1685,7 +2119,7 @@
     if (people.length === 0) return;
     const minX = Math.min(...people.map((person) => person.x ?? 0));
     const maxX = Math.max(...people.map((person) => person.x ?? 0));
-    if (maxX - minX <= 100 * PERSON_GAP) return;
+    if (maxX - minX <= 30 * PERSON_GAP) return;
     const byGeneration = /* @__PURE__ */ new Map();
     for (const person of people) {
       const generation = person.generation ?? 0;
@@ -2123,9 +2557,15 @@
     return collectAuthoritativePersonEntries(roots, pinnedRoots).find((entry) => entry.id === id);
   }
   function entryFootprintLeft(entry) {
+    if (entry.box.kind === "couple" && entry.box.originOf && entry.box.mainPersonId === entry.id) {
+      return entry.box.anchorX(entry.id) - NODE_SIZE / 2;
+    }
     return Math.min(...entry.box.members.map((id) => entry.box.anchorX(id)));
   }
   function entryFootprintRight(entry) {
+    if (entry.box.kind === "couple" && entry.box.originOf && entry.box.mainPersonId === entry.id) {
+      return entry.box.anchorX(entry.id) + NODE_SIZE / 2;
+    }
     return Math.max(...entry.box.members.map((id) => entry.box.anchorX(id)));
   }
   function moveEntryRight(entry, dx, originContext) {
@@ -2148,7 +2588,9 @@
     for (let pass = 0; pass < 80; pass++) {
       let changed = false;
       const entries = collectAuthoritativePersonEntries(roots, originContext.pinnedMovers);
-      const couples = collectBoxes(roots).filter((box) => box.kind === "couple" && box.members.length === 2);
+      const couples = collectBoxes(roots).filter(
+        (box) => box.kind === "couple" && box.members.length === 2 && !box.originOf
+      );
       for (const couple of couples) {
         const left = Math.min(...couple.members.map((id) => couple.anchorX(id)));
         const right = Math.max(...couple.members.map((id) => couple.anchorX(id)));
@@ -2175,7 +2617,9 @@
   }
   function buildOriginLayoutContext(roots, originLinks) {
     return {
-      pinnedMovers: new Set(originLinks.map((link) => link.originRoot)),
+      pinnedMovers: new Set(
+        originLinks.filter((link) => link.couple.originOf !== link.sharedPersonId).map((link) => link.originRoot)
+      ),
       originBundleByRoot: buildOriginBundleMap(roots, originLinks),
       originRootByCoreFamily: buildOriginRootByCoreFamily(roots, originLinks)
     };
@@ -2183,6 +2627,7 @@
   function buildOriginBundleMap(roots, originLinks) {
     const originBundleByRoot = /* @__PURE__ */ new Map();
     for (const link of originLinks) {
+      if (link.couple.originOf === link.sharedPersonId) continue;
       const coreFamily = nearestFamilyForTop(roots, link.couple);
       if (coreFamily) originBundleByRoot.set(link.originRoot, coreFamily);
     }
@@ -2191,6 +2636,7 @@
   function buildOriginRootByCoreFamily(roots, originLinks) {
     const originRootByCoreFamily = /* @__PURE__ */ new Map();
     for (const link of originLinks) {
+      if (link.couple.originOf === link.sharedPersonId) continue;
       const coreFamily = nearestFamilyForTop(roots, link.couple);
       if (coreFamily) originRootByCoreFamily.set(coreFamily, link.originRoot);
     }
@@ -2207,6 +2653,7 @@
         return;
       }
       for (const id of box.members) {
+        if (box.kind === "couple" && box.originOf === id) continue;
         entries.push({ id, x: box.anchorX(id), gen: box.gen, mover: activeMover, box });
       }
     };
@@ -2274,15 +2721,67 @@
         const person = graph.persons.get(memberId);
         if (!person) continue;
         person.x = box.anchorX(memberId);
-        person.y = box.gen * GENERATION_GAP;
       }
     }
     for (const link of originLinks) {
       const person = graph.persons.get(link.sharedPersonId);
       if (!person) continue;
-      person.x = link.couple.anchorX(link.sharedPersonId);
-      person.y = link.couple.gen * GENERATION_GAP;
+      person.x = memberAnchorX(link.originRoot, link.sharedPersonId) ?? link.couple.anchorX(link.sharedPersonId);
     }
+    const generationY = buildGenerationYMap(graph);
+    for (const person of graph.persons.values()) {
+      const generation = person.generation ?? 0;
+      person.y = generationY.get(generation) ?? generation * GENERATION_GAP;
+    }
+  }
+  function buildGenerationYMap(graph) {
+    const generations = [...new Set([...graph.persons.values()].map((person) => person.generation ?? 0))].sort((a, b) => a - b);
+    const extraByGeneration = generationGapExtras(graph);
+    const yByGeneration = /* @__PURE__ */ new Map();
+    let cumulativeExtra = 0;
+    for (const generation of generations) {
+      if (generation > 0) {
+        cumulativeExtra += extraByGeneration.get(generation - 1) ?? 0;
+      }
+      yByGeneration.set(generation, generation * GENERATION_GAP + cumulativeExtra);
+    }
+    return yByGeneration;
+  }
+  function generationGapExtras(graph) {
+    const extras = /* @__PURE__ */ new Map();
+    const requiredGap = ROUTED_MARRIAGE_DROP + MIN_PARENT_DROP + SIBSHIP_DROP;
+    const extra = Math.max(0, requiredGap - GENERATION_GAP);
+    if (extra <= 0) return extras;
+    for (const union of graph.unions.values()) {
+      if (!marriageNeedsLoweredGenerationSpace(graph, union.id, union.partners)) continue;
+      const parentGeneration = graph.persons.get(union.partners[0])?.generation ?? 0;
+      extras.set(parentGeneration, Math.max(extras.get(parentGeneration) ?? 0, extra));
+    }
+    return extras;
+  }
+  function marriageNeedsLoweredGenerationSpace(graph, unionId, partnerIds) {
+    const childIds = graph.childrenMap.get(unionId) ?? [];
+    if (childIds.length === 0 || partnerIds.length !== 2) return false;
+    const [leftId, rightId] = partnerIds;
+    const left = graph.persons.get(leftId);
+    const right = graph.persons.get(rightId);
+    if (!left || !right || !Number.isFinite(left.x) || !Number.isFinite(right.x)) return false;
+    if ((left.generation ?? 0) !== (right.generation ?? 0)) return false;
+    return partnersBothHaveOriginFamilies(graph, partnerIds) || hasSameGenerationMarriageBlocker(graph, partnerIds, left.x ?? 0, right.x ?? 0, left.generation ?? 0);
+  }
+  function partnersBothHaveOriginFamilies(graph, partnerIds) {
+    const parentUnionByChild = /* @__PURE__ */ new Set();
+    for (const childIds of graph.childrenMap.values()) {
+      for (const childId of childIds) parentUnionByChild.add(childId);
+    }
+    return partnerIds.every((id) => parentUnionByChild.has(id));
+  }
+  function hasSameGenerationMarriageBlocker(graph, partnerIds, leftX, rightX, generation) {
+    const minX = Math.min(leftX, rightX);
+    const maxX = Math.max(leftX, rightX);
+    return [...graph.persons.values()].some(
+      (person) => !partnerIds.includes(person.id) && (person.generation ?? 0) === generation && Number.isFinite(person.x) && (person.x ?? 0) > minX && (person.x ?? 0) < maxX
+    );
   }
   function normalizeGraphToOrigin(graph) {
     const people = [...graph.persons.values()].filter(
@@ -2315,7 +2814,9 @@
 
   // src/layout/layoutResultBuilder.ts
   var R = NODE_SIZE / 2;
-  var SIBSHIP_DROP = NODE_SIZE * 1.25;
+  var SIBSHIP_DROP2 = NODE_SIZE * 1.25;
+  var ROUTED_MARRIAGE_DROP2 = NODE_SIZE * 1.65;
+  var MIN_PARENT_DROP2 = NODE_SIZE * 0.65;
   function buildLayoutResult(graph, input) {
     const displayGraph = graphForDisplayRouting(graph);
     const nodes = [...displayGraph.persons.values()].map((person) => ({
@@ -2493,13 +2994,15 @@
   function buildRelationshipSegments(graph, inputPeople, inputUnions, unionAnchors) {
     const segments = [];
     const anchors = new Map(unionAnchors.map((anchor) => [anchor.unionId, anchor]));
+    const marriageLines = /* @__PURE__ */ new Map();
     for (const union of graph.unions.values()) {
       const parentIds = [...union.partners];
       const childIds = [...graph.childrenMap.get(union.id) ?? []];
       const partners = union.partners.map((id) => graph.persons.get(id)).filter(hasCoordinates);
       if (partners.length === 2) {
         const [left, right] = partners[0].x <= partners[1].x ? [partners[0], partners[1]] : [partners[1], partners[0]];
-        const points = marriageLinePoints(graph, left, right, parentIds);
+        const points = marriageLinePoints(graph, left, right, parentIds, childIds);
+        marriageLines.set(union.id, points);
         segments.push({
           id: `${union.id}:marriage`,
           type: "marriage",
@@ -2519,13 +3022,17 @@
       const kids = childIds.map((id) => graph.persons.get(id)).filter(hasCoordinates);
       if (kids.length === 0 || partners.length === 0) continue;
       const anchor = anchors.get(union.id);
-      const dropX = anchor?.x ?? avg(partners.map((person) => person.x));
-      const dropTopY = partners.length === 2 ? anchor?.y ?? avg(partners.map((person) => person.y)) : partners[0].y;
+      const descentStart = marriageDescentStart(marriageLines.get(union.id));
+      const dropX = descentStart?.x ?? anchor?.x ?? avg(partners.map((person) => person.x));
+      const dropTopY = descentStart?.y ?? (partners.length === 2 ? anchor?.y ?? avg(partners.map((person) => person.y)) : partners[0].y);
       const childTopY = Math.min(...kids.map((kid) => kid.y)) - R;
-      const siblingY = childTopY - SIBSHIP_DROP + R;
+      const defaultSiblingY = childTopY - SIBSHIP_DROP2 + R;
+      const lowestSiblingY = childTopY - NODE_SIZE * 0.25;
+      const siblingY = Math.min(lowestSiblingY, Math.max(defaultSiblingY, dropTopY + MIN_PARENT_DROP2));
       const sortedKids = [...kids].sort((a, b) => a.x - b.x);
       const minKidX = sortedKids[0].x;
       const maxKidX = sortedKids[sortedKids.length - 1].x;
+      const singleChild = kids.length === 1;
       segments.push({
         id: `${union.id}:descent`,
         type: "descent",
@@ -2540,7 +3047,20 @@
         },
         points: [{ x: dropX, y: dropTopY }, { x: dropX, y: siblingY }]
       });
-      if (kids.length > 1 || Math.abs(kids[0].x - dropX) >= 0.5) {
+      if (singleChild) {
+        segments.push({
+          id: `${union.id}:sibling`,
+          type: "sibling",
+          kind: "sibling-line",
+          unionId: union.id,
+          childIds,
+          source: {
+            unionId: union.id,
+            childIds
+          },
+          points: [{ x: dropX, y: siblingY }, { x: dropX, y: siblingY }]
+        });
+      } else {
         segments.push({
           id: `${union.id}:sibling`,
           type: "sibling",
@@ -2575,7 +3095,7 @@
           continue;
         }
         const apexX = avg(group.children.map((child) => child.x));
-        const forkY = siblingY + SIBSHIP_DROP * 0.55;
+        const forkY = siblingY + SIBSHIP_DROP2 * 0.55;
         for (const child of group.children) {
           segments.push({
             id: `${union.id}:${child.id}:twin`,
@@ -2619,7 +3139,24 @@
     }
     return applyParentDropDetours(segments);
   }
-  function marriageLinePoints(graph, left, right, partnerIds) {
+  function marriageDescentStart(points) {
+    if (!points || points.length < 2) return void 0;
+    const horizontalSegments = [];
+    for (let i = 1; i < points.length; i++) {
+      const previous = points[i - 1];
+      const current = points[i];
+      if (Math.abs(previous.y - current.y) < 0.5) {
+        horizontalSegments.push({ previous, current });
+      }
+    }
+    const segment = horizontalSegments[horizontalSegments.length - 1];
+    if (!segment) return void 0;
+    return {
+      x: (segment.previous.x + segment.current.x) / 2,
+      y: segment.previous.y
+    };
+  }
+  function marriageLinePoints(graph, left, right, partnerIds, childIds = []) {
     const start = { x: left.x, y: left.y };
     const end = { x: right.x, y: right.y };
     if (Math.abs(left.y - right.y) >= 0.5) {
@@ -2629,9 +3166,17 @@
     const blockers = [...graph.persons.values()].filter(
       (person) => hasCoordinates(person) && !partnerIds.includes(person.id) && Math.abs(person.y - left.y) < 0.5 && person.x > start.x && person.x < end.x
     );
-    if (blockers.length === 0) return [start, end];
-    const routeY = left.y + NODE_SIZE * 2.15;
+    if (blockers.length === 0 && !requiresLoweredChildbearingMarriage(graph, partnerIds, childIds)) return [start, end];
+    const routeY = left.y + ROUTED_MARRIAGE_DROP2;
     return [start, { x: start.x, y: routeY }, { x: end.x, y: routeY }, end];
+  }
+  function requiresLoweredChildbearingMarriage(graph, partnerIds, childIds) {
+    if (childIds.length === 0 || partnerIds.length !== 2) return false;
+    const parentUnionByChild = /* @__PURE__ */ new Set();
+    for (const ids of graph.childrenMap.values()) {
+      for (const id of ids) parentUnionByChild.add(id);
+    }
+    return partnerIds.every((id) => parentUnionByChild.has(id));
   }
   function applyParentDropDetours(segments) {
     const siblingLines = segments.filter(

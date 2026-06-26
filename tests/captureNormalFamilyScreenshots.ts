@@ -102,6 +102,99 @@ const scenarios: NormalScenario[] = [
         ["parents", ["child"]]
       ]
     }
+  },
+  {
+    id: "05-single-parent-one-child",
+    title: "单亲一孩",
+    input: {
+      persons: [
+        { id: "mother", sex: "F" },
+        { id: "child", sex: "U", birthOrder: 0 }
+      ],
+      unions: [
+        { id: "singleParent", partners: ["mother"] }
+      ],
+      childrenMap: [
+        ["singleParent", ["child"]]
+      ]
+    }
+  },
+  {
+    id: "06-two-parent-two-children",
+    title: "双亲二孩",
+    input: {
+      persons: [
+        { id: "father", sex: "M" },
+        { id: "mother", sex: "F" },
+        { id: "son", sex: "M", birthOrder: 0 },
+        { id: "daughter", sex: "F", birthOrder: 1 }
+      ],
+      unions: [
+        { id: "parents", partners: ["father", "mother"] }
+      ],
+      childrenMap: [
+        ["parents", ["daughter", "son"]]
+      ]
+    }
+  },
+  {
+    id: "07-married-child-no-children",
+    title: "子女已婚无子女",
+    input: {
+      persons: [
+        { id: "father", sex: "M" },
+        { id: "mother", sex: "F" },
+        { id: "child", sex: "U", birthOrder: 0 },
+        { id: "spouse", sex: "U" }
+      ],
+      unions: [
+        { id: "parents", partners: ["father", "mother"] },
+        { id: "marriage", partners: ["child", "spouse"] }
+      ],
+      childrenMap: [
+        ["parents", ["child"]],
+        ["marriage", []]
+      ]
+    }
+  },
+  {
+    id: "08-remarriage-half-siblings",
+    title: "再婚半同胞",
+    input: {
+      persons: [
+        { id: "parent", sex: "U" },
+        { id: "firstSpouse", sex: "U" },
+        { id: "secondSpouse", sex: "U" },
+        { id: "olderChild", sex: "U", birthOrder: 0 },
+        { id: "youngerChild", sex: "U", birthOrder: 1 }
+      ],
+      unions: [
+        { id: "firstMarriage", partners: ["firstSpouse", "parent"] },
+        { id: "secondMarriage", partners: ["parent", "secondSpouse"] }
+      ],
+      childrenMap: [
+        ["firstMarriage", ["olderChild"]],
+        ["secondMarriage", ["youngerChild"]]
+      ]
+    }
+  },
+  {
+    id: "09-simple-twins",
+    title: "双亲双胞胎",
+    input: {
+      persons: [
+        { id: "father", sex: "M" },
+        { id: "mother", sex: "F" },
+        { id: "twinA", sex: "M", birthOrder: 0, twinGroup: "tw1", twinType: "identical" },
+        { id: "twinB", sex: "F", birthOrder: 1, twinGroup: "tw1", twinType: "identical" }
+      ],
+      unions: [
+        { id: "parents", partners: ["father", "mother"] }
+      ],
+      childrenMap: [
+        ["parents", ["twinB", "twinA"]]
+      ]
+    }
   }
 ];
 

@@ -1,6 +1,6 @@
 import { PedigreeGraph } from "../model/pedigreeGraph";
 import { UnionNode } from "../model/union";
-import { BASE_MARRIAGE_GAP, BRANCHED_MARRIAGE_GAP, Box, createCoupleBox, createFamilyBox, createPersonBox } from "./boxModel";
+import { BASE_MARRIAGE_GAP, BRANCHED_MARRIAGE_GAP, DUAL_ORIGIN_MARRIAGE_GAP, Box, createCoupleBox, createFamilyBox, createPersonBox } from "./boxModel";
 import { sortChildrenForLayout } from "./childOrdering";
 
 export interface OriginLink {
@@ -144,6 +144,9 @@ function marriageGapForUnion(
   union: UnionNode,
   originOf?: string
 ) {
+  if (union.partners.length === 2 && union.partners.every((partnerId) => parentUnionByChild.has(partnerId))) {
+    return DUAL_ORIGIN_MARRIAGE_GAP;
+  }
   const hasChildren = (graph.childrenMap.get(union.id) ?? []).length > 0;
   const hasOriginPartner = !!originOf || union.partners.some((partnerId) => parentUnionByChild.has(partnerId));
   return hasChildren || hasOriginPartner ? BRANCHED_MARRIAGE_GAP : BASE_MARRIAGE_GAP;
@@ -172,7 +175,7 @@ function shouldPlaceOriginLeft(
   const siblings = sortedChildren(graph, parentUnionId);
   const index = siblings.indexOf(mainPersonId);
   if (index < 0) return false;
-  return index < (siblings.length - 1) / 2;
+  return index > (siblings.length - 1) / 2;
 }
 
 function containsMember(box: Box, memberId: string): boolean {

@@ -3,10 +3,11 @@ export const PERSON_GAP = NODE_SIZE * 2.7;
 export const SLOT = PERSON_GAP;
 export const BASE_MARRIAGE_GAP = NODE_SIZE * 2.1;
 export const BRANCHED_MARRIAGE_GAP = NODE_SIZE * 2.25;
+export const DUAL_ORIGIN_MARRIAGE_GAP = BRANCHED_MARRIAGE_GAP + NODE_SIZE * 1.45;
 export const MARRIAGE_GAP = BRANCHED_MARRIAGE_GAP;
 export const SIBLING_GAP = PERSON_GAP;
 export const MIN_GAP = NODE_SIZE * 0.8;
-export const GENERATION_GAP = NODE_SIZE * 3.7;
+export const GENERATION_GAP = NODE_SIZE * 3.45;
 
 export type BoxKind = "person" | "couple" | "family";
 

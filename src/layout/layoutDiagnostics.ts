@@ -207,6 +207,7 @@ function diagnoseSubfamilySpace(
 
   for (const group of groupModel.groups) {
     if (group.kind !== "married-sibling-subfamily" && !group.requiresDescendantSpace) continue;
+    if (unionUsesLoweredMarriageRoute(layout, group.unionId)) continue;
     const subfamilyBounds = findGroupBoxBounds(boundsModel, group.id);
     if (!subfamilyBounds) continue;
     const rootIds = group.roles
@@ -241,6 +242,15 @@ function diagnoseSubfamilySpace(
   }
 
   return diagnostics;
+}
+
+function unionUsesLoweredMarriageRoute(layout: LayoutResult, unionId?: string) {
+  if (!unionId) return false;
+  return layout.relationshipSegments.some((segment) =>
+    segment.unionId === unionId &&
+    segment.kind === "marriage" &&
+    segment.points.length > 2
+  );
 }
 
 function diagnoseOriginFamilySeparation(

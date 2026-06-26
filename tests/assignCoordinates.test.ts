@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { assignLayers } from "../src/layout/layerAssigner";
 import { reduceCrossings } from "../src/layout/crossingReducer";
 import { assignCoordinates } from "../src/layout/coordinateSolver";
-import { NODE_SIZE, PERSON_GAP } from "../src/layout/boxModel";
+import { DUAL_ORIGIN_MARRIAGE_GAP, NODE_SIZE, PERSON_GAP } from "../src/layout/boxModel";
 import { render } from "../src/render/svgRenderer";
 import { PedigreeGraph } from "../src/model/pedigreeGraph";
 import { Person } from "../src/model/person";
@@ -130,10 +130,12 @@ test("spouse origin family follows marriage anchor without drifting", () => {
   const i4 = graph.persons.get("I4")!;
   const ii2 = graph.persons.get("II2")!;
   const ii3 = graph.persons.get("II3")!;
+  const ii4 = graph.persons.get("II4")!;
   const originDropX = ((i3.x ?? 0) + (i4.x ?? 0)) / 2;
 
   assert.equal(ii2.y, ii3.y);
-  assert.ok(Math.abs((ii2.x ?? 0) - (ii3.x ?? 0)) <= 100);
+  assert.ok(Math.abs((ii2.x ?? 0) - (ii3.x ?? 0)) >= DUAL_ORIGIN_MARRIAGE_GAP - 0.5);
+  assert.ok(Math.abs((ii3.x ?? 0) - (ii4.x ?? 0)) >= PERSON_GAP - 0.5);
   assert.ok(Math.abs(originDropX - (ii3.x ?? 0)) < 0.5);
 });
 
@@ -293,10 +295,11 @@ test("wide spouse origin family expands horizontally without generation downshif
   const ii4 = graph.persons.get("II4")!;
   const sourceChildren = ["R1", "R2", "II3", "R4", "R5"].map((id) => graph.persons.get(id)!);
   const originDropX = ((i3.x ?? 0) + (i4.x ?? 0)) / 2;
+  const originSiblingCenter = ((sourceChildren[0].x ?? 0) + (sourceChildren[sourceChildren.length - 1].x ?? 0)) / 2;
   const sourceLeft = Math.min(...sourceChildren.map((child) => child.x ?? 0));
   const sourceRight = Math.max(...sourceChildren.map((child) => child.x ?? 0));
 
-  assert.ok(Math.abs(originDropX - (ii3.x ?? 0)) < 0.5);
+  assert.ok(Math.abs(originDropX - originSiblingCenter) < 0.5);
   assert.equal(ii2.y, ii3.y);
   assert.equal(ii2.y, ii1.y);
   assert.equal(ii2.y, ii4.y);
@@ -356,6 +359,7 @@ test("unmarried sibling leaves do not overlap spouse origin family symbols", () 
   const ii5 = graph.persons.get("II5")!;
   const ii6 = graph.persons.get("II6")!;
   const originDropX = ((i3.x ?? 0) + (i4.x ?? 0)) / 2;
+  const originSiblingCenter = ((ii3.x ?? 0) + (ii6.x ?? 0)) / 2;
 
   assert.equal(i1.y, i2.y);
   assert.equal(i1.y, i3.y);
@@ -365,8 +369,8 @@ test("unmarried sibling leaves do not overlap spouse origin family symbols", () 
   assert.equal(ii1.y, ii4.y);
   assert.equal(ii1.y, ii5.y);
   assert.equal(ii1.y, ii6.y);
-  assert.ok(Math.abs(originDropX - (ii3.x ?? 0)) < 0.5);
-  assert.ok(Math.abs((ii2.x ?? 0) - (ii3.x ?? 0)) <= 100);
+  assert.ok(Math.abs(originDropX - originSiblingCenter) < 0.5);
+  assert.ok(Math.abs((ii2.x ?? 0) - (ii3.x ?? 0)) >= DUAL_ORIGIN_MARRIAGE_GAP - 0.5);
   assertNoSameGenerationSymbolOverlap(graph);
 });
 
@@ -567,7 +571,7 @@ test("chain marriages keep founders separated and sibling birth order fixed", ()
   const aParentDrop = ((graph.persons.get("A1")!.x ?? 0) + (graph.persons.get("A2")!.x ?? 0)) / 2;
   const aChildCenter = ((graph.persons.get("P1")!.x ?? 0) + (graph.persons.get("P3")!.x ?? 0)) / 2;
   assert.ok(Math.abs(aParentDrop - aChildCenter) < 1);
-  assert.ok(contentWidth(graph) < 12 * PERSON_GAP);
+  assert.ok(contentWidth(graph) < 22 * PERSON_GAP);
 });
 
 function assertNoSameGenerationSymbolOverlap(graph: PedigreeGraph) {

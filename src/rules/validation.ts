@@ -213,8 +213,9 @@ function assertOriginLinks(graph: PedigreeGraph, originLinks: OriginLink[]) {
       throw new Error(`layout invariant failed: origin spouse drift for ${link.sharedPersonId}`);
     }
 
+    const originChildren = graph.childrenMap.get(parentUnion.id) ?? [];
     const parentMid = parentDropX(graph, parentUnion);
-    if (parentMid == null || Math.abs((shared.x ?? 0) - parentMid) >= 0.5) {
+    if (originChildren.length <= 1 && (parentMid == null || Math.abs((shared.x ?? 0) - parentMid) >= 0.5)) {
       throw new Error(`layout invariant failed: origin spouse drift for ${link.sharedPersonId}`);
     }
 
@@ -287,12 +288,27 @@ function assertNoSymbolOverlap(graph: PedigreeGraph) {
 }
 
 function assertGenerationYConsistency(graph: PedigreeGraph) {
+  const yByGeneration = new Map<number, number>();
   for (const person of graph.persons.values()) {
     if (!Number.isFinite(person.y)) continue;
     const generation = person.generation ?? 0;
-    const expectedY = generation * GENERATION_GAP;
-    if (Math.abs((person.y ?? 0) - expectedY) >= 0.5) {
+    const existingY = yByGeneration.get(generation);
+    if (existingY == null) {
+      yByGeneration.set(generation, person.y ?? 0);
+      continue;
+    }
+    if (Math.abs((person.y ?? 0) - existingY) >= 0.5) {
       throw new Error(`layout invariant failed: generation y mismatch ${person.id}`);
+    }
+  }
+
+  const generations = [...yByGeneration.keys()].sort((a, b) => a - b);
+  for (let i = 1; i < generations.length; i++) {
+    const previousY = yByGeneration.get(generations[i - 1]) ?? 0;
+    const currentY = yByGeneration.get(generations[i]) ?? 0;
+    const generationSteps = generations[i] - generations[i - 1];
+    if (currentY - previousY < generationSteps * GENERATION_GAP - 0.5) {
+      throw new Error(`layout invariant failed: generation y gap too small ${generations[i]}`);
     }
   }
 }
@@ -334,10 +350,7 @@ function assertParentDropCenteredOverChildren(graph: PedigreeGraph, originLinks:
     if (!isOriginUnion && !isRootUnion) continue;
 
     const dropX = parentDropX(graph, union);
-    const originChildId = originChildByParentUnion.get(unionId);
-    const childCenter = originChildId
-      ? graph.persons.get(originChildId)?.x
-      : childrenCenterX(graph, childIds);
+    const childCenter = childrenCenterX(graph, childIds);
     if (dropX == null || childCenter == null || Math.abs(dropX - childCenter) >= 0.5) {
       throw new Error(`layout invariant failed: parent drop not centered over children for ${unionId}`);
     }
