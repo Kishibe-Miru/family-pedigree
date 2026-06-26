@@ -1,7 +1,6 @@
 import { PedigreeGraph } from "../model/pedigreeGraph";
 import { assertLayoutInvariants } from "../rules/validation";
 import { Box, createPersonBox, GENERATION_GAP, MARRIAGE_GAP, MIN_GAP, NODE_SIZE, PERSON_GAP, SIBLING_GAP, SLOT } from "./boxModel";
-import { sortChildrenForLayout } from "./childOrdering";
 import { buildForest, OriginLink } from "./familyForest";
 import { buildLayoutPlan, LayoutPlan } from "./layoutPlan";
 import { GenerationOrder, getGenerationOrder } from "./layoutOrder";
@@ -305,7 +304,7 @@ export function assignCoordinates(graph: PedigreeGraph) {
 }
 
 function finalizeGraphCoordinates(graph: PedigreeGraph, originLinks: OriginLink[], layoutPlan: LayoutPlan) {
-  compactWideGraphCoordinates(graph);
+  compactWideGraphCoordinates(graph, layoutPlan);
   for (let i = 0; i < 24; i++) {
     alignGraphParentDrops(graph, originLinks, layoutPlan);
     alignGraphOriginLinks(graph, originLinks, layoutPlan);
@@ -554,7 +553,7 @@ function hasGraphSymbolOverlap(graph: PedigreeGraph) {
   return false;
 }
 
-function compactWideGraphCoordinates(graph: PedigreeGraph) {
+function compactWideGraphCoordinates(graph: PedigreeGraph, layoutPlan: LayoutPlan) {
   const people = [...graph.persons.values()].filter((person) => Number.isFinite(person.x));
   if (people.length === 0) return;
   const minX = Math.min(...people.map((person) => person.x ?? 0));
@@ -569,7 +568,7 @@ function compactWideGraphCoordinates(graph: PedigreeGraph) {
   }
 
   for (const ids of byGeneration.values()) {
-    const ordered = stableGraphTopologicalSort(graph, ids);
+    const ordered = stableGraphTopologicalSort(graph, ids, layoutPlan);
     ordered.forEach((id, index) => {
       const person = graph.persons.get(id);
       if (person) person.x = index * SYMBOL_CENTER_GAP;
@@ -659,15 +658,15 @@ function collectMemberIds(box: Box): Set<string> {
   return ids;
 }
 
-function stableGraphTopologicalSort(graph: PedigreeGraph, ids: string[]) {
+function stableGraphTopologicalSort(graph: PedigreeGraph, ids: string[], layoutPlan: LayoutPlan) {
   const sortedIds = [...ids].sort((a, b) =>
     (graph.persons.get(a)?.x ?? 0) - (graph.persons.get(b)?.x ?? 0) || a.localeCompare(b)
   );
   const originalIndex = new Map(sortedIds.map((id, index) => [id, index]));
   const constraints = new Map(sortedIds.map((id) => [id, new Set<string>()]));
 
-  for (const childIds of graph.childrenMap.values()) {
-    const sortedChildren = sortChildIdsByBirthOrder(graph, childIds).filter((childId) => constraints.has(childId));
+  for (const siblingGroup of layoutPlan.siblingGroups) {
+    const sortedChildren = siblingGroup.orderedChildIds.filter((childId) => constraints.has(childId));
     for (let i = 1; i < sortedChildren.length; i++) {
       constraints.get(sortedChildren[i - 1])?.add(sortedChildren[i]);
     }
@@ -1108,10 +1107,6 @@ function enforceSiblingBirthOrderCoordinates(
 
 function findAuthoritativeEntry(roots: Box[], pinnedRoots: Set<Box>, id: string): PersonEntry | undefined {
   return collectAuthoritativePersonEntries(roots, pinnedRoots).find((entry) => entry.id === id);
-}
-
-function sortChildIdsByBirthOrder(graph: PedigreeGraph, childIds: string[]) {
-  return sortChildrenForLayout(graph, childIds);
 }
 
 function entryFootprintLeft(entry: PersonEntry): number {

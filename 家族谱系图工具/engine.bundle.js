@@ -1384,7 +1384,7 @@
     return graph;
   }
   function finalizeGraphCoordinates(graph, originLinks, layoutPlan) {
-    compactWideGraphCoordinates(graph);
+    compactWideGraphCoordinates(graph, layoutPlan);
     for (let i = 0; i < 24; i++) {
       alignGraphParentDrops(graph, originLinks, layoutPlan);
       alignGraphOriginLinks(graph, originLinks, layoutPlan);
@@ -1598,7 +1598,7 @@
     }
     return false;
   }
-  function compactWideGraphCoordinates(graph) {
+  function compactWideGraphCoordinates(graph, layoutPlan) {
     const people = [...graph.persons.values()].filter((person) => Number.isFinite(person.x));
     if (people.length === 0) return;
     const minX = Math.min(...people.map((person) => person.x ?? 0));
@@ -1611,7 +1611,7 @@
       byGeneration.get(generation)?.push(person.id);
     }
     for (const ids of byGeneration.values()) {
-      const ordered = stableGraphTopologicalSort(graph, ids);
+      const ordered = stableGraphTopologicalSort(graph, ids, layoutPlan);
       ordered.forEach((id, index) => {
         const person = graph.persons.get(id);
         if (person) person.x = index * SYMBOL_CENTER_GAP;
@@ -1685,14 +1685,14 @@
     visit(box);
     return ids;
   }
-  function stableGraphTopologicalSort(graph, ids) {
+  function stableGraphTopologicalSort(graph, ids, layoutPlan) {
     const sortedIds = [...ids].sort(
       (a, b) => (graph.persons.get(a)?.x ?? 0) - (graph.persons.get(b)?.x ?? 0) || a.localeCompare(b)
     );
     const originalIndex = new Map(sortedIds.map((id, index) => [id, index]));
     const constraints = new Map(sortedIds.map((id) => [id, /* @__PURE__ */ new Set()]));
-    for (const childIds of graph.childrenMap.values()) {
-      const sortedChildren2 = sortChildIdsByBirthOrder(graph, childIds).filter((childId) => constraints.has(childId));
+    for (const siblingGroup of layoutPlan.siblingGroups) {
+      const sortedChildren2 = siblingGroup.orderedChildIds.filter((childId) => constraints.has(childId));
       for (let i = 1; i < sortedChildren2.length; i++) {
         constraints.get(sortedChildren2[i - 1])?.add(sortedChildren2[i]);
       }
@@ -2039,9 +2039,6 @@
   }
   function findAuthoritativeEntry(roots, pinnedRoots, id) {
     return collectAuthoritativePersonEntries(roots, pinnedRoots).find((entry) => entry.id === id);
-  }
-  function sortChildIdsByBirthOrder(graph, childIds) {
-    return sortChildrenForLayout(graph, childIds);
   }
   function entryFootprintLeft(entry) {
     return Math.min(...entry.box.members.map((id) => entry.box.anchorX(id)));
