@@ -3,6 +3,7 @@ import { assertLayoutInvariants } from "../rules/validation";
 import { Box, createPersonBox, GENERATION_GAP, MARRIAGE_GAP, MIN_GAP, NODE_SIZE, PERSON_GAP, SIBLING_GAP, SLOT } from "./boxModel";
 import { sortChildrenForLayout } from "./childOrdering";
 import { buildForest, OriginLink } from "./familyForest";
+import { buildLayoutPlan, LayoutPlan } from "./layoutPlan";
 import { GenerationOrder, getGenerationOrder } from "./layoutOrder";
 
 const SYMBOL_MARGIN = NODE_SIZE * 0.3;
@@ -265,6 +266,7 @@ function assertFamilyAnchors(box: Box, expectedDropX: number) {
 export function assignCoordinates(graph: PedigreeGraph) {
   let nextX = 0;
   const { roots: boxes, originLinks } = buildForest(graph);
+  const layoutPlan = buildLayoutPlan(graph);
   const generationOrder = getGenerationOrder(graph);
   if (generationOrder) sortBoxesByGenerationOrder(boxes, generationOrder);
   boxes.forEach(measureBox);
@@ -273,63 +275,64 @@ export function assignCoordinates(graph: PedigreeGraph) {
     placeBox(box, nextX + box.width / 2);
     nextX += box.width + SIBLING_GAP;
   }
+  const originContext = buildOriginLayoutContext(boxes, originLinks);
   resolveGenerationOverlaps(boxes);
   for (let i = 0; i < 160; i++) {
     const originChanged = reconcileOrigins(boxes, originLinks);
     if (originChanged) realignFamilyTops(boxes);
-    const symbolChanged = resolvePersonSymbolOverlaps(boxes, originLinks, generationOrder);
-    const compacted = compactPersonGaps(boxes, originLinks, generationOrder);
-    const siblingCompacted = compactSiblingRows(boxes, originLinks);
+    const symbolChanged = resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
+    const compacted = compactPersonGaps(boxes, originContext, generationOrder);
+    const siblingCompacted = compactSiblingRows(boxes, originLinks, originContext, layoutPlan);
     if (!originChanged && !symbolChanged && !compacted && !siblingCompacted) break;
   }
-  compactWideSiblingRows(boxes, originLinks);
+  compactWideSiblingRows(boxes, originContext, layoutPlan);
   reconcileOrigins(boxes, originLinks);
-  resolvePersonSymbolOverlaps(boxes, originLinks, generationOrder);
-  if (generationOrder) enforceGenerationOrder(boxes, originLinks, generationOrder);
+  resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
+  if (generationOrder) enforceGenerationOrder(boxes, originLinks, originContext, generationOrder);
   reconcileOrigins(boxes, originLinks);
-  resolvePersonSymbolOverlaps(boxes, originLinks, generationOrder);
-  if (generationOrder) enforceGenerationOrder(boxes, originLinks, generationOrder);
+  resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
+  if (generationOrder) enforceGenerationOrder(boxes, originLinks, originContext, generationOrder);
   reconcileOrigins(boxes, originLinks);
-  resolvePersonSymbolOverlaps(boxes, originLinks, generationOrder);
-  resolveActualSymbolOverlaps(boxes, originLinks);
-  finalizeLayoutConstraints(graph, boxes, originLinks);
+  resolvePersonSymbolOverlaps(boxes, originLinks, originContext, generationOrder);
+  resolveActualSymbolOverlaps(boxes, originLinks, originContext);
+  finalizeLayoutConstraints(graph, boxes, originLinks, originContext, layoutPlan);
   writeBackCoordinates(graph, boxes, originLinks);
-  finalizeGraphCoordinates(graph, originLinks);
+  finalizeGraphCoordinates(graph, originLinks, layoutPlan);
   normalizeGraphToOrigin(graph);
   assertLayoutInvariants(graph, originLinks);
 
   return graph;
 }
 
-function finalizeGraphCoordinates(graph: PedigreeGraph, originLinks: OriginLink[]) {
+function finalizeGraphCoordinates(graph: PedigreeGraph, originLinks: OriginLink[], layoutPlan: LayoutPlan) {
   compactWideGraphCoordinates(graph);
   for (let i = 0; i < 24; i++) {
-    alignGraphParentDrops(graph, originLinks);
-    alignGraphOriginLinks(graph, originLinks);
-    const siblingChanged = enforceGraphSiblingBirthOrder(graph, originLinks);
+    alignGraphParentDrops(graph, originLinks, layoutPlan);
+    alignGraphOriginLinks(graph, originLinks, layoutPlan);
+    const siblingChanged = enforceGraphSiblingBirthOrder(graph, layoutPlan);
     alignGraphOriginMarriagesSafely(graph, originLinks);
     const overlapChanged = repairGraphOriginOverlaps(graph, originLinks);
     if (!siblingChanged && !overlapChanged) break;
   }
-  alignGraphParentDrops(graph, originLinks);
-  alignGraphOriginLinks(graph, originLinks);
-  enforceGraphSiblingBirthOrder(graph, originLinks);
+  alignGraphParentDrops(graph, originLinks, layoutPlan);
+  alignGraphOriginLinks(graph, originLinks, layoutPlan);
+  enforceGraphSiblingBirthOrder(graph, layoutPlan);
   repairGraphOriginOverlaps(graph, originLinks);
-  enforceGraphSiblingBirthOrder(graph, originLinks);
-  alignGraphParentDrops(graph, originLinks);
+  enforceGraphSiblingBirthOrder(graph, layoutPlan);
+  alignGraphParentDrops(graph, originLinks, layoutPlan);
   repairGraphSymbolOverlaps(graph);
-  alignGraphOriginLinks(graph, originLinks);
-  enforceGraphSiblingBirthOrder(graph, originLinks);
-  alignGraphParentDrops(graph, originLinks);
+  alignGraphOriginLinks(graph, originLinks, layoutPlan);
+  enforceGraphSiblingBirthOrder(graph, layoutPlan);
+  alignGraphParentDrops(graph, originLinks, layoutPlan);
   repairGraphSymbolOverlaps(graph);
   alignGraphOriginMarriagesSafely(graph, originLinks);
   repairGraphSymbolOverlaps(graph);
 }
 
-function enforceGraphSiblingBirthOrder(graph: PedigreeGraph, originLinks: OriginLink[]) {
+function enforceGraphSiblingBirthOrder(graph: PedigreeGraph, layoutPlan: LayoutPlan) {
   let changed = false;
-  for (const childIds of graph.childrenMap.values()) {
-    const sorted = sortChildIdsByBirthOrder(graph, childIds);
+  for (const siblingGroup of layoutPlan.siblingGroups) {
+    const sorted = siblingGroup.orderedChildIds;
     for (let i = 1; i < sorted.length; i++) {
       const previous = graph.persons.get(sorted[i - 1]);
       const current = graph.persons.get(sorted[i]);
@@ -363,11 +366,19 @@ function repairGraphSymbolOverlaps(graph: PedigreeGraph) {
   }
 }
 
-function alignGraphParentDrops(graph: PedigreeGraph, originLinks: OriginLink[] = []) {
+function alignGraphParentDrops(graph: PedigreeGraph, originLinks: OriginLink[] = [], layoutPlan?: LayoutPlan) {
   const originChildByParentUnion = new Map<string, string>();
-  for (const link of originLinks) {
-    for (const [unionId, childIds] of graph.childrenMap.entries()) {
-      if (childIds.includes(link.sharedPersonId)) originChildByParentUnion.set(unionId, link.sharedPersonId);
+  if (layoutPlan) {
+    const sharedOriginPeople = new Set(originLinks.map((link) => link.sharedPersonId));
+    for (const separation of layoutPlan.originSeparations) {
+      if (!sharedOriginPeople.has(separation.sharedPersonId)) continue;
+      originChildByParentUnion.set(separation.originUnionId, separation.sharedPersonId);
+    }
+  } else {
+    for (const link of originLinks) {
+      for (const [unionId, childIds] of graph.childrenMap.entries()) {
+        if (childIds.includes(link.sharedPersonId)) originChildByParentUnion.set(unionId, link.sharedPersonId);
+      }
     }
   }
 
@@ -471,16 +482,17 @@ function computeParentCenter(graph: PedigreeGraph, partnerIds: readonly string[]
   return xs.reduce((sum, x) => sum + x, 0) / xs.length;
 }
 
-function alignGraphOriginLinks(graph: PedigreeGraph, originLinks: OriginLink[]) {
+function alignGraphOriginLinks(graph: PedigreeGraph, originLinks: OriginLink[], layoutPlan: LayoutPlan) {
+  const originUnionBySharedPerson = new Map(
+    layoutPlan.originSeparations.map((separation) => [separation.sharedPersonId, separation.originUnionId])
+  );
   for (const link of originLinks) {
     const shared = graph.persons.get(link.sharedPersonId);
     if (!shared || !Number.isFinite(shared.x)) continue;
-    const parentUnion = [...graph.childrenMap.entries()].find(([, childIds]) =>
-      childIds.includes(link.sharedPersonId)
-    );
-    if (!parentUnion) continue;
 
-    const union = graph.unions.get(parentUnion[0]);
+    const originUnionId = originUnionBySharedPerson.get(link.sharedPersonId);
+    if (!originUnionId) continue;
+    const union = graph.unions.get(originUnionId);
     if (!union) continue;
     const parentXs = union.partners
       .map((id) => graph.persons.get(id)?.x)
@@ -683,41 +695,42 @@ function stableGraphTopologicalSort(graph: PedigreeGraph, ids: string[]) {
   return out.length === sortedIds.length ? out : sortedIds;
 }
 
-function finalizeLayoutConstraints(graph: PedigreeGraph, roots: Box[], originLinks: OriginLink[]) {
+function finalizeLayoutConstraints(
+  graph: PedigreeGraph,
+  roots: Box[],
+  originLinks: OriginLink[],
+  originContext: OriginLayoutContext,
+  layoutPlan: LayoutPlan
+) {
   for (let i = 0; i < 180; i++) {
     reconcileOrigins(roots, originLinks);
     realignFamilyTops(roots);
-    const coupleChanged = resolveCoupleIntrusions(roots, originLinks);
-    const overlapChanged = resolveActualSymbolOverlaps(roots, originLinks);
+    const coupleChanged = resolveCoupleIntrusions(roots, originLinks, originContext);
+    const overlapChanged = resolveActualSymbolOverlaps(roots, originLinks, originContext);
     reconcileOrigins(roots, originLinks);
     realignFamilyTops(roots);
-    const finalOverlapChanged = resolveActualSymbolOverlaps(roots, originLinks);
+    const finalOverlapChanged = resolveActualSymbolOverlaps(roots, originLinks, originContext);
     if (!coupleChanged && !overlapChanged && !finalOverlapChanged) break;
   }
 
   for (let i = 0; i < 8; i++) {
-    const siblingChanged = enforceSiblingBirthOrderCoordinates(graph, roots, originLinks);
-    const compacted = compactSiblingRows(roots, originLinks) || compactWideSiblingRows(roots, originLinks);
+    const siblingChanged = enforceSiblingBirthOrderCoordinates(graph, roots, originContext, layoutPlan);
+    const compacted = compactSiblingRows(roots, originLinks, originContext, layoutPlan) ||
+      compactWideSiblingRows(roots, originContext, layoutPlan);
     reconcileOrigins(roots, originLinks);
     realignFamilyTops(roots);
-    const overlapChanged = resolveActualSymbolOverlaps(roots, originLinks);
+    const overlapChanged = resolveActualSymbolOverlaps(roots, originLinks, originContext);
     if (!siblingChanged && !compacted && !overlapChanged) break;
   }
-  resolveActualSymbolOverlaps(roots, originLinks);
+  resolveActualSymbolOverlaps(roots, originLinks, originContext);
 }
 
-function compactWideSiblingRows(roots: Box[], originLinks: OriginLink[]) {
-  const originByCoreFamily = new Map<Box, Box>();
-  for (const link of originLinks) {
-    const coreFamily = nearestFamilyForTop(roots, link.couple);
-    if (coreFamily) originByCoreFamily.set(coreFamily, link.originRoot);
-  }
+function compactWideSiblingRows(roots: Box[], originContext: OriginLayoutContext, layoutPlan: LayoutPlan) {
+  const siblingFamilies = siblingFamilyBoxes(roots, layoutPlan);
 
   const visit = (box: Box): boolean => {
-    for (const child of box.children ?? []) {
-      if (visit(child)) return true;
-    }
-    if (box.kind !== "family" || !box.children || box.children.length < 2) return false;
+    if (!siblingFamilies.includes(box)) return false;
+    if (!box.children || box.children.length < 2) return false;
 
     for (let i = 1; i < box.children.length; i++) {
       const previous = box.children[i - 1];
@@ -729,7 +742,7 @@ function compactWideSiblingRows(roots: Box[], originLinks: OriginLink[]) {
       const dx = (gap - desiredGap) / 2;
       shiftSubtree(previous, dx);
       const currentMovers = [current];
-      const originRoot = originByCoreFamily.get(current);
+      const originRoot = originContext.originRootByCoreFamily.get(current);
       if (originRoot) currentMovers.push(originRoot);
       const boundedDx = boundNegativeShift(roots, currentMovers, -dx);
       currentMovers.forEach((mover) => shiftSubtree(mover, boundedDx));
@@ -742,8 +755,8 @@ function compactWideSiblingRows(roots: Box[], originLinks: OriginLink[]) {
   let anyChanged = false;
   for (let i = 0; i < 80; i++) {
     let changed = false;
-    for (const root of roots) {
-      changed = visit(root) || changed;
+    for (const family of siblingFamilies) {
+      changed = visit(family) || changed;
       if (changed) break;
     }
     anyChanged = anyChanged || changed;
@@ -752,20 +765,18 @@ function compactWideSiblingRows(roots: Box[], originLinks: OriginLink[]) {
   return anyChanged;
 }
 
-function compactSiblingRows(roots: Box[], originLinks: OriginLink[]) {
-  const pinnedMovers = new Set(originLinks.map((link) => link.originRoot));
-  const originByCoreFamily = new Map<Box, Box>();
-  for (const link of originLinks) {
-    const coreFamily = nearestFamilyForTop(roots, link.couple);
-    if (coreFamily) originByCoreFamily.set(coreFamily, link.originRoot);
-  }
+function compactSiblingRows(
+  roots: Box[],
+  originLinks: OriginLink[],
+  originContext: OriginLayoutContext,
+  layoutPlan: LayoutPlan
+) {
   let changed = false;
+  const siblingFamilies = siblingFamilyBoxes(roots, layoutPlan);
 
   const visit = (box: Box): boolean => {
-    for (const child of box.children ?? []) {
-      if (visit(child)) return true;
-    }
-    if (box.kind !== "family" || !box.children || box.children.length < 2) return false;
+    if (!siblingFamilies.includes(box)) return false;
+    if (!box.children || box.children.length < 2) return false;
 
     for (let i = 1; i < box.children.length; i++) {
       const previous = box.children[i - 1];
@@ -775,16 +786,16 @@ function compactSiblingRows(roots: Box[], originLinks: OriginLink[]) {
       if (excess <= 0.5) continue;
 
       const movers = [current];
-      const originRoot = originByCoreFamily.get(current);
+      const originRoot = originContext.originRootByCoreFamily.get(current);
       if (originRoot) movers.push(originRoot);
-      if (movers.some((mover) => pinnedMovers.has(mover)) && !originRoot) continue;
+      if (movers.some((mover) => originContext.pinnedMovers.has(mover)) && !originRoot) continue;
 
       const boundedDx = boundNegativeShift(roots, movers, -Math.min(excess, PERSON_GAP / 2));
       if (Math.abs(boundedDx) >= 0.5) {
         movers.forEach((mover) => shiftSubtree(mover, boundedDx));
       } else {
         const fallbackDx = Math.min(excess, PERSON_GAP / 2);
-        if (pinnedMovers.has(previous)) continue;
+        if (originContext.pinnedMovers.has(previous)) continue;
         shiftSubtree(previous, fallbackDx);
       }
       realignFamilyTops(roots);
@@ -794,14 +805,35 @@ function compactSiblingRows(roots: Box[], originLinks: OriginLink[]) {
     return false;
   };
 
-  for (const root of roots) {
-    if (visit(root)) break;
+  for (const family of siblingFamilies) {
+    if (visit(family)) break;
   }
 
   if (changed) {
     reconcileOrigins(roots, originLinks);
   }
   return changed;
+}
+
+function siblingFamilyBoxes(roots: Box[], layoutPlan: LayoutPlan): Box[] {
+  const families = collectBoxes(roots).filter((box) => box.kind === "family" && box.children && box.children.length > 1);
+  return layoutPlan.siblingGroups.flatMap((siblingGroup) =>
+    families.filter((family) => familyMatchesSiblingGroup(family, siblingGroup.parentIds, siblingGroup.childIds))
+  );
+}
+
+function familyMatchesSiblingGroup(family: Box, parentIds: string[], childIds: string[]): boolean {
+  if (!sameMembers(family.top?.members ?? family.members, parentIds)) return false;
+  const familyChildIds = (family.children ?? [])
+    .map((child) => child.mainPersonId ?? child.members[0])
+    .filter((id): id is string => !!id);
+  return sameMembers(familyChildIds, childIds);
+}
+
+function sameMembers(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const leftSet = new Set(left);
+  return right.every((id) => leftSet.has(id));
 }
 
 function sortBoxesByGenerationOrder(roots: Box[], order: GenerationOrder) {
@@ -827,15 +859,17 @@ function sortBoxesByGenerationOrder(roots: Box[], order: GenerationOrder) {
   roots.sort((a, b) => boxRank(a) - boxRank(b));
 }
 
-function enforceGenerationOrder(roots: Box[], originLinks: OriginLink[], order: GenerationOrder) {
+function enforceGenerationOrder(
+  roots: Box[],
+  originLinks: OriginLink[],
+  originContext: OriginLayoutContext,
+  order: GenerationOrder
+) {
   const rank = buildOrderRank(order);
-  const pinnedMovers = new Set(originLinks.map((link) => link.originRoot));
-  const originBundleByRoot = buildOriginBundleMap(roots, originLinks);
-  const originRootByCoreFamily = buildOriginRootByCoreFamily(roots, originLinks);
 
   for (let pass = 0; pass < 64; pass++) {
     let changed = false;
-    const entries = collectOrderedPersonEntries(roots, pinnedMovers, rank);
+    const entries = collectOrderedPersonEntries(roots, originContext.pinnedMovers, rank);
     for (let i = 1; i < entries.length; i++) {
       const previous = entries[i - 1];
       const current = entries[i];
@@ -846,18 +880,18 @@ function enforceGenerationOrder(roots: Box[], originLinks: OriginLink[], order: 
       const need = previous.x + SYMBOL_CENTER_GAP - current.x;
       if (need <= 0) continue;
 
-      const currentBundle = originBundleByRoot.get(current.mover);
-      const currentOriginRoot = originRootByCoreFamily.get(current.mover);
-      const previousOriginRoot = originRootByCoreFamily.get(previous.mover);
+      const currentBundle = originContext.originBundleByRoot.get(current.mover);
+      const currentOriginRoot = originContext.originRootByCoreFamily.get(current.mover);
+      const previousOriginRoot = originContext.originRootByCoreFamily.get(previous.mover);
       if (currentBundle) {
         shiftSubtree(currentBundle, need);
         shiftSubtree(current.mover, need);
       } else if (currentOriginRoot) {
         shiftSubtree(current.mover, need);
         shiftSubtree(currentOriginRoot, need);
-      } else if (!pinnedMovers.has(current.mover)) {
+      } else if (!originContext.pinnedMovers.has(current.mover)) {
         shiftSubtree(current.mover, need);
-      } else if (!pinnedMovers.has(previous.mover)) {
+      } else if (!originContext.pinnedMovers.has(previous.mover)) {
         shiftSubtree(previous.mover, -need);
         if (previousOriginRoot) shiftSubtree(previousOriginRoot, -need);
       } else {
@@ -889,12 +923,10 @@ function buildOrderRank(order: GenerationOrder) {
   return rank;
 }
 
-function compactPersonGaps(roots: Box[], originLinks: OriginLink[], order?: GenerationOrder) {
-  const pinnedMovers = new Set(originLinks.map((link) => link.originRoot));
-  const originBundleByRoot = buildOriginBundleMap(roots, originLinks);
+function compactPersonGaps(roots: Box[], originContext: OriginLayoutContext, order?: GenerationOrder) {
   const rank = order ? buildOrderRank(order) : undefined;
   const byGeneration = new Map<number, PersonEntry[]>();
-  for (const entry of collectAuthoritativePersonEntries(roots, pinnedMovers)) {
+  for (const entry of collectAuthoritativePersonEntries(roots, originContext.pinnedMovers)) {
     if (!byGeneration.has(entry.gen)) byGeneration.set(entry.gen, []);
     byGeneration.get(entry.gen)?.push(entry);
   }
@@ -911,13 +943,13 @@ function compactPersonGaps(roots: Box[], originLinks: OriginLink[], order?: Gene
       if (excess <= PERSON_GAP) continue;
 
       const requestedDx = -Math.min(excess, PERSON_GAP / 2);
-      const currentBundle = originBundleByRoot.get(current.mover);
+      const currentBundle = originContext.originBundleByRoot.get(current.mover);
       if (currentBundle) {
         const movers = [currentBundle, current.mover];
         const boundedDx = boundNegativeShift(roots, movers, requestedDx);
         if (Math.abs(boundedDx) < 0.5) continue;
         movers.forEach((mover) => shiftSubtree(mover, boundedDx));
-      } else if (!pinnedMovers.has(current.mover)) {
+      } else if (!originContext.pinnedMovers.has(current.mover)) {
         const boundedDx = boundNegativeShift(roots, [current.mover], requestedDx);
         if (Math.abs(boundedDx) < 0.5) continue;
         shiftSubtree(current.mover, boundedDx);
@@ -937,15 +969,17 @@ function preferredGap(a: PersonEntry, b: PersonEntry): number {
   return a.mover === b.mover ? NODE_SIZE : PERSON_GAP;
 }
 
-function resolvePersonSymbolOverlaps(roots: Box[], originLinks: OriginLink[], order?: GenerationOrder) {
-  const pinnedMovers = new Set(originLinks.map((link) => link.originRoot));
-  const originBundleByRoot = buildOriginBundleMap(roots, originLinks);
-  const originRootByCoreFamily = buildOriginRootByCoreFamily(roots, originLinks);
+function resolvePersonSymbolOverlaps(
+  roots: Box[],
+  originLinks: OriginLink[],
+  originContext: OriginLayoutContext,
+  order?: GenerationOrder
+) {
   const rank = order ? buildOrderRank(order) : undefined;
   let changed = false;
 
   for (let pass = 0; pass < 24; pass++) {
-    const entries = collectAuthoritativePersonEntries(roots, pinnedMovers).sort((a, b) => personEntryCompare(a, b, rank));
+    const entries = collectAuthoritativePersonEntries(roots, originContext.pinnedMovers).sort((a, b) => personEntryCompare(a, b, rank));
     let passChanged = false;
 
     for (let i = 1; i < entries.length; i++) {
@@ -957,10 +991,10 @@ function resolvePersonSymbolOverlaps(roots: Box[], originLinks: OriginLink[], or
       const need = SYMBOL_CENTER_GAP - (current.x - previous.x);
       if (need <= 0) continue;
 
-      const currentBundle = originBundleByRoot.get(current.mover);
-      const currentOriginRoot = originRootByCoreFamily.get(current.mover);
-      const previousOriginRoot = originRootByCoreFamily.get(previous.mover);
-      if (primaryAnchorX(current.mover) < previous.x - 0.5 && !pinnedMovers.has(previous.mover)) {
+      const currentBundle = originContext.originBundleByRoot.get(current.mover);
+      const currentOriginRoot = originContext.originRootByCoreFamily.get(current.mover);
+      const previousOriginRoot = originContext.originRootByCoreFamily.get(previous.mover);
+      if (primaryAnchorX(current.mover) < previous.x - 0.5 && !originContext.pinnedMovers.has(previous.mover)) {
         const dx = current.x + SYMBOL_CENTER_GAP - previous.x;
         shiftSubtree(previous.mover, dx);
         if (previousOriginRoot) shiftSubtree(previousOriginRoot, dx);
@@ -970,9 +1004,9 @@ function resolvePersonSymbolOverlaps(roots: Box[], originLinks: OriginLink[], or
       } else if (currentOriginRoot) {
         shiftSubtree(current.mover, need);
         shiftSubtree(currentOriginRoot, need);
-      } else if (!pinnedMovers.has(current.mover)) {
+      } else if (!originContext.pinnedMovers.has(current.mover)) {
         shiftSubtree(current.mover, need);
-      } else if (!pinnedMovers.has(previous.mover)) {
+      } else if (!originContext.pinnedMovers.has(previous.mover)) {
         shiftSubtree(previous.mover, -need);
         if (previousOriginRoot) shiftSubtree(previousOriginRoot, -need);
       } else {
@@ -991,14 +1025,16 @@ function resolvePersonSymbolOverlaps(roots: Box[], originLinks: OriginLink[], or
   return changed;
 }
 
-function resolveActualSymbolOverlaps(roots: Box[], originLinks: OriginLink[], generationFilter?: number) {
-  const pinnedMovers = new Set(originLinks.map((link) => link.originRoot));
-  const originBundleByRoot = buildOriginBundleMap(roots, originLinks);
-  const originRootByCoreFamily = buildOriginRootByCoreFamily(roots, originLinks);
+function resolveActualSymbolOverlaps(
+  roots: Box[],
+  originLinks: OriginLink[],
+  originContext: OriginLayoutContext,
+  generationFilter?: number
+) {
   let anyChanged = false;
 
   for (let pass = 0; pass < 160; pass++) {
-    const entries = collectAuthoritativePersonEntries(roots, pinnedMovers)
+    const entries = collectAuthoritativePersonEntries(roots, originContext.pinnedMovers)
       .sort((a, b) => a.gen - b.gen || a.x - b.x || a.id.localeCompare(b.id));
     let changed = false;
 
@@ -1012,18 +1048,18 @@ function resolveActualSymbolOverlaps(roots: Box[], originLinks: OriginLink[], ge
       const need = previous.x + SYMBOL_CENTER_GAP - current.x;
       if (need <= 0) continue;
 
-      const currentBundle = originBundleByRoot.get(current.mover);
-      const currentOriginRoot = originRootByCoreFamily.get(current.mover);
-      const previousOriginRoot = originRootByCoreFamily.get(previous.mover);
+      const currentBundle = originContext.originBundleByRoot.get(current.mover);
+      const currentOriginRoot = originContext.originRootByCoreFamily.get(current.mover);
+      const previousOriginRoot = originContext.originRootByCoreFamily.get(previous.mover);
       if (currentBundle) {
         shiftSubtree(currentBundle, need);
         shiftSubtree(current.mover, need);
       } else if (currentOriginRoot) {
         shiftSubtree(current.mover, need);
         shiftSubtree(currentOriginRoot, need);
-      } else if (!pinnedMovers.has(current.mover)) {
+      } else if (!originContext.pinnedMovers.has(current.mover)) {
         shiftSubtree(current.mover, need);
-      } else if (!pinnedMovers.has(previous.mover)) {
+      } else if (!originContext.pinnedMovers.has(previous.mover)) {
         shiftSubtree(previous.mover, -need);
         if (previousOriginRoot) shiftSubtree(previousOriginRoot, -need);
       } else {
@@ -1042,24 +1078,26 @@ function resolveActualSymbolOverlaps(roots: Box[], originLinks: OriginLink[], ge
   return anyChanged;
 }
 
-function enforceSiblingBirthOrderCoordinates(graph: PedigreeGraph, roots: Box[], originLinks: OriginLink[]) {
-  const pinnedMovers = new Set(originLinks.map((link) => link.originRoot));
-  const originBundleByRoot = buildOriginBundleMap(roots, originLinks);
-  const originRootByCoreFamily = buildOriginRootByCoreFamily(roots, originLinks);
+function enforceSiblingBirthOrderCoordinates(
+  graph: PedigreeGraph,
+  roots: Box[],
+  originContext: OriginLayoutContext,
+  layoutPlan: LayoutPlan
+) {
   let changed = false;
 
-  for (const childIds of graph.childrenMap.values()) {
-    const sorted = sortChildIdsByBirthOrder(graph, childIds);
+  for (const siblingGroup of layoutPlan.siblingGroups) {
+    const sorted = siblingGroup.orderedChildIds;
     for (let i = 1; i < sorted.length; i++) {
-      const previous = findAuthoritativeEntry(roots, pinnedMovers, sorted[i - 1]);
-      const current = findAuthoritativeEntry(roots, pinnedMovers, sorted[i]);
+      const previous = findAuthoritativeEntry(roots, originContext.pinnedMovers, sorted[i - 1]);
+      const current = findAuthoritativeEntry(roots, originContext.pinnedMovers, sorted[i]);
       if (!previous || !current || previous.gen !== current.gen) continue;
 
       const previousRight = entryFootprintRight(previous);
       const currentLeft = entryFootprintLeft(current);
       const need = previousRight + SYMBOL_CENTER_GAP - currentLeft;
       if (need <= 0) continue;
-      moveEntryRight(current, need, pinnedMovers, originBundleByRoot, originRootByCoreFamily);
+      moveEntryRight(current, need, originContext);
       changed = true;
     }
   }
@@ -1087,12 +1125,10 @@ function entryFootprintRight(entry: PersonEntry): number {
 function moveEntryRight(
   entry: PersonEntry,
   dx: number,
-  pinnedMovers: Set<Box>,
-  originBundleByRoot: Map<Box, Box>,
-  originRootByCoreFamily: Map<Box, Box>
+  originContext: OriginLayoutContext
 ) {
-  const bundle = originBundleByRoot.get(entry.mover);
-  const originRoot = originRootByCoreFamily.get(entry.mover);
+  const bundle = originContext.originBundleByRoot.get(entry.mover);
+  const originRoot = originContext.originRootByCoreFamily.get(entry.mover);
   if (bundle) {
     shiftSubtree(bundle, dx);
     shiftSubtree(entry.mover, dx);
@@ -1101,20 +1137,17 @@ function moveEntryRight(
     shiftSubtree(originRoot, dx);
   } else if (entry.box.kind === "person") {
     shiftSubtree(entry.box, dx);
-  } else if (!pinnedMovers.has(entry.mover)) {
+  } else if (!originContext.pinnedMovers.has(entry.mover)) {
     shiftSubtree(entry.mover, dx);
   }
 }
 
-function resolveCoupleIntrusions(roots: Box[], originLinks: OriginLink[]) {
-  const pinnedMovers = new Set(originLinks.map((link) => link.originRoot));
-  const originBundleByRoot = buildOriginBundleMap(roots, originLinks);
-  const originRootByCoreFamily = buildOriginRootByCoreFamily(roots, originLinks);
+function resolveCoupleIntrusions(roots: Box[], originLinks: OriginLink[], originContext: OriginLayoutContext) {
   let anyChanged = false;
 
   for (let pass = 0; pass < 80; pass++) {
     let changed = false;
-    const entries = collectAuthoritativePersonEntries(roots, pinnedMovers);
+    const entries = collectAuthoritativePersonEntries(roots, originContext.pinnedMovers);
     const couples = collectBoxes(roots).filter((box) => box.kind === "couple" && box.members.length === 2);
 
     for (const couple of couples) {
@@ -1124,7 +1157,7 @@ function resolveCoupleIntrusions(roots: Box[], originLinks: OriginLink[]) {
         if (entry.gen !== couple.gen || couple.members.includes(entry.id)) continue;
         if (entry.x <= left || entry.x >= right) continue;
         const need = right + SYMBOL_CENTER_GAP - entry.x;
-        moveEntryRight(entry, need, pinnedMovers, originBundleByRoot, originRootByCoreFamily);
+        moveEntryRight(entry, need, originContext);
         reconcileOrigins(roots, originLinks);
         realignFamilyTops(roots);
         changed = true;
@@ -1147,6 +1180,14 @@ function personEntryCompare(a: PersonEntry, b: PersonEntry, rank?: Map<string, n
     a.id.localeCompare(b.id);
 }
 
+function buildOriginLayoutContext(roots: Box[], originLinks: OriginLink[]): OriginLayoutContext {
+  return {
+    pinnedMovers: new Set(originLinks.map((link) => link.originRoot)),
+    originBundleByRoot: buildOriginBundleMap(roots, originLinks),
+    originRootByCoreFamily: buildOriginRootByCoreFamily(roots, originLinks)
+  };
+}
+
 function buildOriginBundleMap(roots: Box[], originLinks: OriginLink[]) {
   const originBundleByRoot = new Map<Box, Box>();
   for (const link of originLinks) {
@@ -1163,6 +1204,12 @@ function buildOriginRootByCoreFamily(roots: Box[], originLinks: OriginLink[]) {
     if (coreFamily) originRootByCoreFamily.set(coreFamily, link.originRoot);
   }
   return originRootByCoreFamily;
+}
+
+interface OriginLayoutContext {
+  pinnedMovers: Set<Box>;
+  originBundleByRoot: Map<Box, Box>;
+  originRootByCoreFamily: Map<Box, Box>;
 }
 
 interface PersonEntry {

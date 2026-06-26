@@ -6,7 +6,7 @@
   "scripts": {
     "build:engine": "esbuild src/browser/entry.ts --bundle --format=iife --outfile=家族谱系图工具/engine.bundle.js",
     "typecheck": "tsc --noEmit",
-    "test:unit": "node --import tsx --test tests/assignCoordinates.test.ts tests/browserEntry.test.ts tests/render.test.ts tests/validation.test.ts tests/manualPositions.test.ts tests/complexLayoutFixtures.test.ts tests/relationshipSegmentMetadata.test.ts tests/relationshipGroups.test.ts tests/layoutDiagnostics.test.ts tests/groupBoxBounds.test.ts",
+    "test:unit": "node --import tsx --test tests/assignCoordinates.test.ts tests/browserEntry.test.ts tests/render.test.ts tests/validation.test.ts tests/manualPositions.test.ts tests/complexLayoutFixtures.test.ts tests/relationshipSegmentMetadata.test.ts tests/relationshipGroups.test.ts tests/layoutPlan.test.ts tests/layoutDiagnostics.test.ts tests/groupBoxBounds.test.ts",
     "test:e2e": "node --import tsx --test tests/browserSmoke.test.ts",
     "test": "npm run typecheck && npm run test:unit"
   },
