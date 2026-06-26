@@ -1,5 +1,12 @@
 # 更新记录
 
+## v5.2 - 2026-06-26
+
+- 明确架构边界：graph engine 只做布局，浏览器版继续作为医学渲染本体。
+- 将 `src/render/svgRenderer.ts` 降级为引擎自测 / 调试 renderer，避免发展成第二套产品渲染器。
+- 将 `twinGroup` / `twinType` 传入底层 graph，并让双胞胎组作为布局排序约束保持相邻。
+- 新增双胞胎相邻排布与血亲婚配环路回归测试。
+
 ## v5.1 - 2026-06-24
 
 - 新增 `src/` 分层工程骨架：`model`、`layout`、`render`、`rules`、`core`。

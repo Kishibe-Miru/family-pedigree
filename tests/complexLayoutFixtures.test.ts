@@ -144,6 +144,43 @@ test("complex known-problem family satisfies layout regression invariants", () =
   );
 });
 
+test("consanguineous cousin marriage loop remains layoutable", () => {
+  const layout = buildLayout({
+    persons: [
+      { id: "GF", sex: "M" },
+      { id: "GM", sex: "F" },
+      { id: "P1", sex: "M", birthOrder: 0 },
+      { id: "P2", sex: "F", birthOrder: 1 },
+      { id: "S1", sex: "F" },
+      { id: "S2", sex: "M" },
+      { id: "C1", sex: "M", birthOrder: 0 },
+      { id: "C2", sex: "F", birthOrder: 0 },
+      { id: "K", sex: "U", birthOrder: 0 }
+    ],
+    unions: [
+      { id: "uGrand", partners: ["GF", "GM"] },
+      { id: "uP1", partners: ["P1", "S1"] },
+      { id: "uP2", partners: ["P2", "S2"] },
+      { id: "uCousin", partners: ["C1", "C2"], consanguineous: true }
+    ],
+    childrenMap: [
+      ["uGrand", ["P1", "P2"]],
+      ["uP1", ["C1"]],
+      ["uP2", ["C2"]],
+      ["uCousin", ["K"]]
+    ]
+  });
+
+  assertNoNodeOverlaps(layout);
+  assertMarriageSegmentConnects(layout, "C1", "C2");
+  assertGenerationOrder(layout, ["GF", "GM"], ["P1", "P2"]);
+  assertGenerationOrder(layout, ["P1", "S1", "P2", "S2"], ["C1", "C2"]);
+  assertGenerationOrder(layout, ["C1", "C2"], ["K"]);
+  const cousinMarriage = layout.relationshipSegments.find((segment) => segment.id === "uCousin:marriage");
+  assert.equal(cousinMarriage?.doubleLine, true);
+  assertUnionHasCompleteProvenance(layout, "uCousin", { parentIds: ["C1", "C2"], childIds: ["K"] });
+});
+
 function buildLayout(input: LayoutInput): LayoutResult {
   const response = layout(input);
   assert.ok(response.ok);
@@ -175,7 +212,9 @@ function graphFromInput(input: LayoutInput): PedigreeGraph {
       {
         id: person.id,
         sex: person.sex,
-        birthOrder: person.birthOrder
+        birthOrder: person.birthOrder,
+        twinGroup: person.twinGroup,
+        twinType: person.twinType
       }
     ])),
     unions: new Map(input.unions.map((union) => [

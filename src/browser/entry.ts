@@ -90,7 +90,9 @@ function layoutInputToGraph(input: LayoutInput): PedigreeGraph {
       {
         id: person.id,
         sex: person.sex,
-        birthOrder: person.birthOrder
+        birthOrder: person.birthOrder,
+        twinGroup: person.twinGroup,
+        twinType: person.twinType
       }
     ])),
     unions: new Map(input.unions.map((union) => [

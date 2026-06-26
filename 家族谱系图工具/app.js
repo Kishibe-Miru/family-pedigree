@@ -1,7 +1,7 @@
 "use strict";
 
 /* ============================================================
-   精神科遗传家族谱系图绘制工具 5.1
+   精神科遗传家族谱系图绘制工具 5.2
    纯前端、本地优先。本版新增：双胞胎（同卵/异卵）、携带者圆点、
    近亲婚配自动双线、拖动自由摆放开关、一键生成家族史文字。
    4.1：连线 T 形修复；新增"与已选成员结婚"连接已有节点为配偶；
@@ -11,11 +11,12 @@
    4.8：稳定性修复：多配偶子女归属选择、独生子女断线、校验与撤销/存储修复。
    5.0：显式领域模型：Union / Parentage / Phenotype / GeneticFinding / Layout。
    5.1：建立 graph engine 分层骨架，移除旧 person-person edge 与 tree layout 主体。
+   5.2：收敛架构边界：engine 专注布局，浏览器版保留医学渲染；双胞胎进入布局排序约束。
    ============================================================ */
 
 const AUTOSAVE_KEY = "psychiatric-pedigree-v3-autosave";
 const SVG_NS = "http://www.w3.org/2000/svg";
-const VERSION = "5.1";
+const VERSION = "5.2";
 
 // 自动生成时使用的占位名（非用户真实输入），家族史等场景应视为"无名"
 const PLACEHOLDER_NAMES = new Set([

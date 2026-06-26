@@ -1,6 +1,7 @@
 import { PedigreeGraph } from "../model/pedigreeGraph";
 import { assertLayoutInvariants } from "../rules/validation";
 import { Box, createPersonBox, GENERATION_GAP, MARRIAGE_GAP, MIN_GAP, NODE_SIZE, PERSON_GAP, SIBLING_GAP, SLOT } from "./boxModel";
+import { sortChildrenForLayout } from "./childOrdering";
 import { buildForest, OriginLink } from "./familyForest";
 import { GenerationOrder, getGenerationOrder } from "./layoutOrder";
 
@@ -1072,11 +1073,7 @@ function findAuthoritativeEntry(roots: Box[], pinnedRoots: Set<Box>, id: string)
 }
 
 function sortChildIdsByBirthOrder(graph: PedigreeGraph, childIds: string[]) {
-  return [...childIds].sort((a, b) => {
-    const left = graph.persons.get(a)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-    const right = graph.persons.get(b)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-    return left - right || a.localeCompare(b);
-  });
+  return sortChildrenForLayout(graph, childIds);
 }
 
 function entryFootprintLeft(entry: PersonEntry): number {

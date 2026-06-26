@@ -1,5 +1,6 @@
 import { PedigreeGraph } from "../model/pedigreeGraph";
 import { UnionNode } from "../model/union";
+import { sortChildrenForLayout } from "./childOrdering";
 import { GenerationOrder, setGenerationOrder } from "./layoutOrder";
 
 export function reduceCrossings(graph: PedigreeGraph) {
@@ -210,11 +211,7 @@ function buildUnionsByPartner(graph: PedigreeGraph): Map<string, UnionNode[]> {
 }
 
 function sortChildren(graph: PedigreeGraph, childIds: string[]): string[] {
-  return [...childIds].sort((a, b) => {
-    const left = graph.persons.get(a)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-    const right = graph.persons.get(b)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-    return left - right || a.localeCompare(b);
-  });
+  return sortChildrenForLayout(graph, childIds);
 }
 
 function unionSortKey(graph: PedigreeGraph, union: UnionNode): string {

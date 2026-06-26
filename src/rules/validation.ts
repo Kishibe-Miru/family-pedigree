@@ -1,5 +1,6 @@
 import { PedigreeGraph } from "../model/pedigreeGraph";
 import { GENERATION_GAP, NODE_SIZE } from "../layout/boxModel";
+import { sortChildrenForLayout } from "../layout/childOrdering";
 import { OriginLink } from "../layout/familyForest";
 
 export class GraphValidationError extends Error {
@@ -251,11 +252,7 @@ function assertSiblingBirthOrder(graph: PedigreeGraph) {
 }
 
 function sortChildrenByBirthOrder(graph: PedigreeGraph, childIds: string[]) {
-  return [...childIds].sort((a, b) => {
-    const left = graph.persons.get(a)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-    const right = graph.persons.get(b)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-    return left - right || a.localeCompare(b);
-  });
+  return sortChildrenForLayout(graph, childIds);
 }
 
 function assertSiblingLinesUseOneUnion(graph: PedigreeGraph) {

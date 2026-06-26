@@ -67,8 +67,8 @@ test("browser smoke renders stable pedigree scenarios", async (t) => {
   const halfSiblings = scenarioMetrics.find((metrics) => metrics.name === "03-half-siblings");
 
   assert.ok(empty);
-  assert.equal(empty.title, "精神科遗传家族谱系图绘制工具 5.1");
-  assert.equal(empty.heading, "家族谱系图绘制工具 5.1");
+  assert.equal(empty.title, "精神科遗传家族谱系图绘制工具 5.2");
+  assert.equal(empty.heading, "家族谱系图绘制工具 5.2");
   assert.equal(empty.personFormHidden, true);
   assert.equal(empty.symbolCount, 0);
 

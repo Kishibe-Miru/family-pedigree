@@ -1,6 +1,7 @@
 import { PedigreeGraph } from "../model/pedigreeGraph";
 import { UnionNode } from "../model/union";
 import { Box, createCoupleBox, createFamilyBox, createPersonBox } from "./boxModel";
+import { sortChildrenForLayout } from "./childOrdering";
 
 export interface OriginLink {
   couple: Box;
@@ -37,11 +38,7 @@ function buildUnionsByPartner(graph: PedigreeGraph): Map<string, UnionNode[]> {
 }
 
 function sortedChildren(graph: PedigreeGraph, unionId: string): string[] {
-  return [...(graph.childrenMap.get(unionId) ?? [])].sort((a, b) => {
-    const left = graph.persons.get(a)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-    const right = graph.persons.get(b)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-    return left - right || a.localeCompare(b);
-  });
+  return sortChildrenForLayout(graph, graph.childrenMap.get(unionId) ?? []);
 }
 
 export function buildForest(graph: PedigreeGraph): ForestBuildResult {

@@ -8,6 +8,7 @@ import { validateGraph } from "../rules/validation";
 const R = NODE_SIZE / 2;
 const MARGIN = NODE_SIZE;
 
+// Diagnostic renderer only. Product medical rendering lives in the browser UI.
 export function renderLayoutResultToSvg(layout: LayoutResult): string {
   const frame = computeFrame(layout);
   const labels = layout.generationLabels.map(renderGenerationLabel).join("");

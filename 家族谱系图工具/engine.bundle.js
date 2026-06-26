@@ -34,6 +34,35 @@
     return graph;
   }
 
+  // src/layout/childOrdering.ts
+  function sortChildrenForLayout(graph, childIds) {
+    const groups = /* @__PURE__ */ new Map();
+    const singles = [];
+    for (const childId of childIds) {
+      const twinGroup = graph.persons.get(childId)?.twinGroup;
+      if (!twinGroup) {
+        singles.push(childId);
+        continue;
+      }
+      if (!groups.has(twinGroup)) groups.set(twinGroup, []);
+      groups.get(twinGroup)?.push(childId);
+    }
+    const blocks = [
+      ...singles.map((id) => ({ ids: [id], key: childSortKey(graph, [id]) })),
+      ...[...groups.values()].map((ids) => ({
+        ids: [...ids].sort((a, b) => childSortKey(graph, [a]).localeCompare(childSortKey(graph, [b]))),
+        key: childSortKey(graph, ids)
+      }))
+    ];
+    return blocks.sort((a, b) => a.key.localeCompare(b.key)).flatMap((block) => block.ids);
+  }
+  function childSortKey(graph, ids) {
+    const orders2 = ids.map((id) => graph.persons.get(id)?.birthOrder ?? Number.MAX_SAFE_INTEGER);
+    const order = Math.min(...orders2);
+    const firstId = [...ids].sort()[0] ?? "";
+    return `${order.toString().padStart(16, "0")}:${firstId}`;
+  }
+
   // src/layout/layoutOrder.ts
   var orders = /* @__PURE__ */ new WeakMap();
   function setGenerationOrder(graph, order) {
@@ -207,11 +236,7 @@
     return unionsByPartner;
   }
   function sortChildren(graph, childIds) {
-    return [...childIds].sort((a, b) => {
-      const left = graph.persons.get(a)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-      const right = graph.persons.get(b)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-      return left - right || a.localeCompare(b);
-    });
+    return sortChildrenForLayout(graph, childIds);
   }
   function unionSortKey(graph, union) {
     const generation = Math.min(...union.partners.map((id) => graph.persons.get(id)?.generation ?? 0));
@@ -624,11 +649,7 @@
     }
   }
   function sortChildrenByBirthOrder(graph, childIds) {
-    return [...childIds].sort((a, b) => {
-      const left = graph.persons.get(a)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-      const right = graph.persons.get(b)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-      return left - right || a.localeCompare(b);
-    });
+    return sortChildrenForLayout(graph, childIds);
   }
   function assertSiblingLinesUseOneUnion(graph) {
     const seenChildren = /* @__PURE__ */ new Map();
@@ -742,11 +763,7 @@
     return unionsByPartner;
   }
   function sortedChildren(graph, unionId) {
-    return [...graph.childrenMap.get(unionId) ?? []].sort((a, b) => {
-      const left = graph.persons.get(a)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-      const right = graph.persons.get(b)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-      return left - right || a.localeCompare(b);
-    });
+    return sortChildrenForLayout(graph, graph.childrenMap.get(unionId) ?? []);
   }
   function buildForest(graph) {
     const parentUnionByChild = buildParentUnionByChild2(graph);
@@ -1743,11 +1760,7 @@
     return collectAuthoritativePersonEntries(roots, pinnedRoots).find((entry) => entry.id === id);
   }
   function sortChildIdsByBirthOrder(graph, childIds) {
-    return [...childIds].sort((a, b) => {
-      const left = graph.persons.get(a)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-      const right = graph.persons.get(b)?.birthOrder ?? Number.MAX_SAFE_INTEGER;
-      return left - right || a.localeCompare(b);
-    });
+    return sortChildrenForLayout(graph, childIds);
   }
   function entryFootprintLeft(entry) {
     return Math.min(...entry.box.members.map((id) => entry.box.anchorX(id)));
@@ -2293,7 +2306,9 @@
         {
           id: person.id,
           sex: person.sex,
-          birthOrder: person.birthOrder
+          birthOrder: person.birthOrder,
+          twinGroup: person.twinGroup,
+          twinType: person.twinType
         }
       ])),
       unions: new Map(input.unions.map((union) => [

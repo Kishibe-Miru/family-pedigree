@@ -5,6 +5,8 @@ export interface Person {
   sex: Sex;
   affected?: boolean;
   carrier?: boolean;
+  twinGroup?: string;
+  twinType?: "fraternal" | "identical";
 
   generation?: number;
   birthOrder?: number;
