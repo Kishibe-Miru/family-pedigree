@@ -1214,13 +1214,11 @@ function directOriginMarriageRouteWouldConflict(graph: PedigreeGraph, link: Orig
   const originUnionId = parentUnionByChild.get(link.sharedPersonId);
   if (!sourceUnionId || !originUnionId) return false;
 
-  const sourceChildren = graph.childrenMap.get(sourceUnionId) ?? [];
-  if (sourceChildren.length > 1) return true;
-
   const source = graph.persons.get(mainPersonId);
   const shared = graph.persons.get(link.sharedPersonId);
   if (!source || !shared || !Number.isFinite(source.x) || !Number.isFinite(shared.x)) return false;
   if ((source.generation ?? 0) !== (shared.generation ?? 0)) return false;
+  const sourceChildren = graph.childrenMap.get(sourceUnionId) ?? [];
 
   return hasSameGenerationSiblingBetween(
     graph,

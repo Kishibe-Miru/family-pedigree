@@ -160,9 +160,22 @@ function orderPartnersForMain(
   originOf?: string
 ): string[] {
   if (!mainPersonId || !originOf || union.partners.length !== 2) return [...union.partners];
+  const sexOrdered = orderPartnersBySex(graph, mainPersonId, originOf);
+  if (sexOrdered) return sexOrdered;
   return shouldPlaceOriginLeft(graph, parentUnionByChild, mainPersonId)
     ? [originOf, mainPersonId]
     : [mainPersonId, originOf];
+}
+
+function orderPartnersBySex(graph: PedigreeGraph, mainPersonId: string, originOf: string): string[] | null {
+  const main = graph.persons.get(mainPersonId);
+  const origin = graph.persons.get(originOf);
+  if (!main || !origin || main.sex === origin.sex) return null;
+  if (main.sex === "M" && origin.sex !== "M") return [mainPersonId, originOf];
+  if (origin.sex === "M" && main.sex !== "M") return [originOf, mainPersonId];
+  if (main.sex === "F" && origin.sex !== "F") return [originOf, mainPersonId];
+  if (origin.sex === "F" && main.sex !== "F") return [mainPersonId, originOf];
+  return null;
 }
 
 function shouldPlaceOriginLeft(

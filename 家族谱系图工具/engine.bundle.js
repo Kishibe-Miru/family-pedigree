@@ -860,7 +860,19 @@
   }
   function orderPartnersForMain(graph, parentUnionByChild, union, mainPersonId, originOf) {
     if (!mainPersonId || !originOf || union.partners.length !== 2) return [...union.partners];
+    const sexOrdered = orderPartnersBySex(graph, mainPersonId, originOf);
+    if (sexOrdered) return sexOrdered;
     return shouldPlaceOriginLeft2(graph, parentUnionByChild, mainPersonId) ? [originOf, mainPersonId] : [mainPersonId, originOf];
+  }
+  function orderPartnersBySex(graph, mainPersonId, originOf) {
+    const main = graph.persons.get(mainPersonId);
+    const origin = graph.persons.get(originOf);
+    if (!main || !origin || main.sex === origin.sex) return null;
+    if (main.sex === "M" && origin.sex !== "M") return [mainPersonId, originOf];
+    if (origin.sex === "M" && main.sex !== "M") return [originOf, mainPersonId];
+    if (main.sex === "F" && origin.sex !== "F") return [originOf, mainPersonId];
+    if (origin.sex === "F" && main.sex !== "F") return [mainPersonId, originOf];
+    return null;
   }
   function shouldPlaceOriginLeft2(graph, parentUnionByChild, mainPersonId) {
     const parentUnionId = parentUnionByChild.get(mainPersonId);
@@ -2110,12 +2122,11 @@
     const sourceUnionId = parentUnionByChild.get(mainPersonId);
     const originUnionId = parentUnionByChild.get(link.sharedPersonId);
     if (!sourceUnionId || !originUnionId) return false;
-    const sourceChildren = graph.childrenMap.get(sourceUnionId) ?? [];
-    if (sourceChildren.length > 1) return true;
     const source = graph.persons.get(mainPersonId);
     const shared = graph.persons.get(link.sharedPersonId);
     if (!source || !shared || !Number.isFinite(source.x) || !Number.isFinite(shared.x)) return false;
     if ((source.generation ?? 0) !== (shared.generation ?? 0)) return false;
+    const sourceChildren = graph.childrenMap.get(sourceUnionId) ?? [];
     return hasSameGenerationSiblingBetween(
       graph,
       mainPersonId,

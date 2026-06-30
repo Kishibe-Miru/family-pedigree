@@ -445,6 +445,51 @@ test("normal married child without children remains a compact spouse union", () 
   assert.equal(result.relationshipSegments.some((segment) => segment.unionId === "marriage" && segment.kind === "parent-drop"), false);
 });
 
+test("normal dual-origin spouse can stay direct when sex order avoids sibling blockers", () => {
+  const result = buildLayout({
+    persons: [
+      { id: "father", sex: "M" },
+      { id: "mother", sex: "F" },
+      { id: "olderBrother", sex: "M", birthOrder: 0 },
+      { id: "proband", sex: "M", birthOrder: 1 },
+      { id: "spouseFather", sex: "M" },
+      { id: "spouseMother", sex: "F" },
+      { id: "spouse", sex: "F", birthOrder: 0 }
+    ],
+    unions: [
+      { id: "parents", partners: ["father", "mother"] },
+      { id: "spouseParents", partners: ["spouseFather", "spouseMother"] },
+      { id: "marriage", partners: ["proband", "spouse"] }
+    ],
+    childrenMap: [
+      ["parents", ["olderBrother", "proband"]],
+      ["spouseParents", ["spouse"]],
+      ["marriage", []]
+    ]
+  });
+
+  assertNoNodeOverlaps(result);
+  assertChildrenShareSiblingLine(result, ["olderBrother", "proband"]);
+  assertMarriageSegmentConnects(result, "proband", "spouse");
+
+  const olderBrother = findNode(result, "olderBrother");
+  const proband = findNode(result, "proband");
+  const spouse = findNode(result, "spouse");
+  const spouseFather = findNode(result, "spouseFather");
+  const spouseMother = findNode(result, "spouseMother");
+  const marriage = result.relationshipSegments.find((segment) =>
+    segment.unionId === "marriage" && segment.kind === "marriage"
+  );
+
+  assert.ok(marriage, "missing marriage line");
+  assert.equal(marriage.points.length, 2);
+  assert.ok(olderBrother.x < proband.x);
+  assert.ok(proband.x < spouse.x);
+  assert.ok(spouseFather.x < spouseMother.x);
+  assert.ok(spouseFather.x > proband.x);
+  assert.ok(Math.abs(spouse.x - proband.x - DUAL_ORIGIN_MARRIAGE_GAP) < 0.5);
+});
+
 test("normal local spouse of an origin sibling stays adjacent by couple order", () => {
   const result = buildLayout({
     persons: [
