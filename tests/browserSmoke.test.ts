@@ -81,6 +81,7 @@ test("browser smoke renders stable pedigree scenarios", async (t) => {
   assert.equal(empty.title, "精神科遗传家族谱系图绘制工具 6.0.2");
   assert.equal(empty.heading, "家族谱系图绘制工具 6.0.2");
   assert.equal(empty.personFormHidden, true);
+  assert.equal(empty.hasCopyPngButton, true);
   assert.equal(empty.symbolCount, 0);
 
   assert.ok(family);
@@ -170,6 +171,7 @@ async function collectMetrics(page: Page, name: string): Promise<ScenarioMetrics
       title: document.title,
       heading: document.querySelector("h1")?.textContent?.trim() ?? "",
       projectMeta: document.querySelector("#projectMeta")?.textContent?.trim() ?? "",
+      hasCopyPngButton: !!document.querySelector("#copyPngBtn"),
       status: document.querySelector("#statusLine")?.textContent?.trim() ?? "",
       zoom: document.querySelector("#zoomLabel")?.textContent?.trim() ?? "",
       viewBox: document.querySelector("#pedigreeSvg")?.getAttribute("viewBox") ?? "",
@@ -401,6 +403,7 @@ interface ScenarioMetrics {
   zoom: string;
   viewBox: string;
   personFormHidden: boolean;
+  hasCopyPngButton: boolean;
   symbolCount: number;
   lineCount: number;
   generationLabels: string[];

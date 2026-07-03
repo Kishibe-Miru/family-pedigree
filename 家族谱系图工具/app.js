@@ -80,7 +80,7 @@ function init() {
 function cacheElements() {
   const ids = [
     "projectMeta", "undoBtn", "redoBtn", "newProjectBtn", "saveJsonBtn",
-    "loadJsonInput", "exportPngBtn", "exportSvgBtn", "addProbandBtn", "addPersonBtn",
+    "loadJsonInput", "exportPngBtn", "copyPngBtn", "exportSvgBtn", "addProbandBtn", "addPersonBtn",
     "addFatherBtn", "addMotherBtn", "addPartnerBtn", "addOlderBrotherBtn", "addYoungerBrotherBtn",
     "addOlderSisterBtn", "addYoungerSisterBtn",
     "addSonBtn", "addDaughterBtn", "autoLayoutBtn", "zoomInBtn", "zoomOutBtn", "resetViewBtn", "zoomLabel",
@@ -130,6 +130,7 @@ function bindEvents() {
   els.saveJsonBtn.addEventListener("click", saveJson);
   els.loadJsonInput.addEventListener("change", loadJson);
   els.exportPngBtn.addEventListener("click", () => exportImage("png"));
+  els.copyPngBtn.addEventListener("click", copyPngImage);
   els.exportSvgBtn.addEventListener("click", () => exportImage("svg"));
 
   els.zoomInBtn.addEventListener("click", () => zoomBy(0.15));
@@ -1492,9 +1493,9 @@ function exportStyles() {
   `;
 }
 
-function exportImage(kind) {
+async function exportImage(kind) {
   if (state.project.people.length === 0) { setStatus("画布为空，无法导出"); return; }
-  const { svg, W, H } = buildExportSvg();
+  const { svg } = buildExportSvg();
   const xml = new XMLSerializer().serializeToString(svg);
   if (kind === "svg") {
     const blob = new Blob([`<?xml version="1.0" encoding="UTF-8"?>\n` + xml], { type: "image/svg+xml;charset=utf-8" });
@@ -1502,24 +1503,66 @@ function exportImage(kind) {
     setStatus("SVG 已导出");
     return;
   }
-  // PNG
+  try {
+    const png = await renderExportPngBlob();
+    download(png, `${safeName(state.project.title)}_${stamp()}.png`);
+    setStatus("PNG 已导出");
+  } catch (error) {
+    console.error(error);
+    setStatus("PNG 导出失败，请重试");
+  }
+}
+
+async function copyPngImage() {
+  if (state.project.people.length === 0) { setStatus("画布为空，无法复制图片"); return; }
+  if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+    setStatus("当前浏览器不支持复制图片，请使用导出 PNG");
+    return;
+  }
+  try {
+    const png = await renderExportPngBlob();
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+    setStatus("图片已复制到剪贴板");
+  } catch (error) {
+    console.error(error);
+    setStatus("复制图片失败，请使用导出 PNG");
+  }
+}
+
+function renderExportPngBlob() {
+  const { svg, W, H } = buildExportSvg();
+  const xml = new XMLSerializer().serializeToString(svg);
   const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const img = new Image();
-  img.onload = () => {
-    const scale = 2.5;
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.round(W * scale);
-    canvas.height = Math.round(H * scale);
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    URL.revokeObjectURL(url);
-    canvas.toBlob((png) => { download(png, `${safeName(state.project.title)}_${stamp()}.png`); setStatus("PNG 已导出"); }, "image/png");
-  };
-  img.onerror = () => { URL.revokeObjectURL(url); setStatus("PNG 导出失败，请重试"); };
-  img.src = url;
+
+  return new Promise((resolve, reject) => {
+    img.onload = () => {
+      const scale = 2.5;
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(W * scale);
+      canvas.height = Math.round(H * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        URL.revokeObjectURL(url);
+        reject(new Error("Canvas 2D context unavailable"));
+        return;
+      }
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      canvas.toBlob((png) => {
+        if (png) resolve(png);
+        else reject(new Error("PNG blob creation failed"));
+      }, "image/png");
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Export SVG image decode failed"));
+    };
+    img.src = url;
+  });
 }
 
 /* ============================================================
