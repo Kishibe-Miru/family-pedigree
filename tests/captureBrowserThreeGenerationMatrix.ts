@@ -140,7 +140,7 @@ function makeScenario(
 
   const project: BrowserProject = {
     schemaVersion: 2,
-    version: "6.0.2",
+    version: "6.0.3",
     title: `浏览器三代 ${id}`,
     createdAt: now,
     updatedAt: now,
