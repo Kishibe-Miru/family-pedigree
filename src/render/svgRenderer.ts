@@ -1,7 +1,7 @@
 import { computeLayout } from "../layout/computeLayout";
 import { NODE_SIZE } from "../layout/boxModel";
 import { buildLayoutResult } from "../layout/layoutResultBuilder";
-import { LayoutInput, LayoutNode, LayoutResult, RelationshipSegment } from "../model/layoutResult";
+import { LayoutInput, LayoutNode, LayoutResult, MarriageMark, RelationshipSegment } from "../model/layoutResult";
 import { PedigreeGraph } from "../model/pedigreeGraph";
 import { validateGraph } from "../rules/validation";
 
@@ -48,8 +48,17 @@ function renderRelationshipSegment(segment: RelationshipSegment): string {
   const points = segment.points || [];
   if (points.length < 2) return "";
   const primary = renderSegmentPoints(segment, points);
-  if (!segment.doubleLine) return primary;
-  return `${primary}${renderSegmentPoints(segment, points.map((point) => ({ x: point.x, y: point.y + 3 })))}`;
+  const marks = (segment.marks ?? []).map((mark) => renderMarriageMark(segment, mark)).join("");
+  if (!segment.doubleLine) return `${primary}${marks}`;
+  return `${primary}${renderSegmentPoints(segment, points.map((point) => ({ x: point.x, y: point.y + 3 })))}${marks}`;
+}
+
+// 离婚 / 分居斜杠（与浏览器版 ui/canvas.js 的几何保持一致）
+const MARK_HALF_WIDTH = 4;
+const MARK_HALF_HEIGHT = 8;
+
+function renderMarriageMark(segment: RelationshipSegment, mark: MarriageMark): string {
+  return `<line class="pedigree-line marriage-mark marriage-mark-${mark.kind}" data-kind="${mark.kind}" data-union="${escapeAttr(segment.unionId || "")}" x1="${fmt(mark.x - MARK_HALF_WIDTH)}" y1="${fmt(mark.y + MARK_HALF_HEIGHT)}" x2="${fmt(mark.x + MARK_HALF_WIDTH)}" y2="${fmt(mark.y - MARK_HALF_HEIGHT)}"/>`;
 }
 
 function renderSegmentPoints(segment: RelationshipSegment, points: Array<{ x: number; y: number }>): string {

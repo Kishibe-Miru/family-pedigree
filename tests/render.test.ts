@@ -203,3 +203,98 @@ function standardGraph(): { graph: PedigreeGraph; input: LayoutInput } {
   };
   return { graph, input };
 }
+
+/* ============================================================
+   离婚 / 分居标记
+   ============================================================ */
+function marriageSegmentOf(result: LayoutResult, unionId: string) {
+  const segment = result.relationshipSegments.find((candidate) => candidate.type === "marriage" && candidate.unionId === unionId);
+  assert.ok(segment, `missing marriage segment for ${unionId}`);
+  return segment;
+}
+
+function divorceInput(status: "partner" | "separated" | "divorced", withChildren: boolean): LayoutInput {
+  return {
+    persons: [
+      { id: "father", sex: "M" },
+      { id: "mother", sex: "F" },
+      ...(withChildren ? [{ id: "c1", sex: "U" as const, birthOrder: 0 }, { id: "c2", sex: "M" as const, birthOrder: 1 }] : [])
+    ],
+    unions: [{ id: "u0", partners: ["father", "mother"], status }],
+    childrenMap: withChildren ? [["u0", ["c1", "c2"]]] : []
+  };
+}
+
+test("在婚状态不生成斜杠标记", () => {
+  const response = layout(divorceInput("partner", true));
+  assert.ok(response.ok);
+  const segment = marriageSegmentOf(response.layout, "u0");
+  assert.equal(segment.status, "partner");
+  assert.deepEqual(segment.marks, []);
+  assert.doesNotMatch(renderLayoutResultToSvg(response.layout), /marriage-mark/);
+});
+
+test("分居生成 1 道斜杠，离婚生成 2 道斜杠，都落在婚配线上", () => {
+  for (const [status, count] of [["separated", 1], ["divorced", 2]] as const) {
+    const response = layout(divorceInput(status, false));
+    assert.ok(response.ok);
+    const segment = marriageSegmentOf(response.layout, "u0");
+    assert.equal(segment.status, status);
+    assert.equal(segment.marks?.length, count);
+    const [start, end] = [segment.points[0], segment.points[segment.points.length - 1]];
+    for (const mark of segment.marks ?? []) {
+      assert.equal(mark.kind, status);
+      assert.equal(mark.y, start.y);
+      assert.ok(mark.x > Math.min(start.x, end.x) + NODE_SIZE / 2);
+      assert.ok(mark.x < Math.max(start.x, end.x) - NODE_SIZE / 2);
+    }
+    const svg = renderLayoutResultToSvg(response.layout);
+    assert.equal((svg.match(/class="pedigree-line marriage-mark marriage-mark-/g) ?? []).length, count);
+  }
+});
+
+test("有子女时斜杠避开子女下降线，并位于下降线与外侧配偶之间", () => {
+  const response = layout(divorceInput("divorced", true));
+  assert.ok(response.ok);
+  const segment = marriageSegmentOf(response.layout, "u0");
+  const descent = response.layout.relationshipSegments.find((candidate) => candidate.type === "descent" && candidate.unionId === "u0");
+  assert.ok(descent);
+  const dropX = descent.points[0].x;
+  const father = response.layout.nodes.find((node) => node.id === "father")!;
+  assert.equal(segment.marks?.length, 2);
+  for (const mark of segment.marks ?? []) {
+    assert.ok(Math.abs(mark.x - dropX) > 6, "斜杠不能压在下降线上");
+    assert.ok(mark.x > father.x + NODE_SIZE / 2, "斜杠不能压在配偶符号上");
+    assert.ok(mark.x < dropX);
+  }
+});
+
+test("再婚：斜杠落在只有这一段婚姻的一方那一侧", () => {
+  const response = layout({
+    persons: [
+      { id: "ex", sex: "M", birthOrder: 1 },
+      { id: "mother", sex: "F", birthOrder: 2 },
+      { id: "husband", sex: "M", birthOrder: 3 },
+      { id: "c1", sex: "U", birthOrder: 4 },
+      { id: "c2", sex: "U", birthOrder: 5 }
+    ],
+    unions: [
+      { id: "first", partners: ["ex", "mother"], status: "divorced", order: 1 },
+      { id: "second", partners: ["husband", "mother"], status: "partner", order: 2 }
+    ],
+    childrenMap: [["first", ["c1"]], ["second", ["c2"]]]
+  });
+  assert.ok(response.ok);
+  const nodes = new Map(response.layout.nodes.map((node) => [node.id, node]));
+  const first = marriageSegmentOf(response.layout, "first");
+  const second = marriageSegmentOf(response.layout, "second");
+  assert.deepEqual(second.marks, []);
+  assert.equal(first.marks?.length, 2);
+  const ex = nodes.get("ex")!;
+  const mother = nodes.get("mother")!;
+  const mid = (ex.x + mother.x) / 2;
+  for (const mark of first.marks ?? []) {
+    const nearerToEx = Math.abs(mark.x - ex.x) < Math.abs(mark.x - mother.x);
+    assert.ok(nearerToEx || Math.abs(mark.x - mid) < 1, "斜杠应靠近前夫一侧");
+  }
+});

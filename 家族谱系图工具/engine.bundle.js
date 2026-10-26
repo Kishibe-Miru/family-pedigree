@@ -411,6 +411,56 @@
       }
     };
   }
+  function createHubTopBox(hub, generation, originOf) {
+    const [first, ...rest] = hub.unions;
+    const members = [first.partnerId, hub.personId, ...rest.map((union) => union.partnerId)];
+    const offsets = /* @__PURE__ */ new Map();
+    offsets.set(first.partnerId, -first.marriageGap);
+    offsets.set(hub.personId, 0);
+    let x = 0;
+    rest.forEach((union, index) => {
+      x += index === 0 ? union.marriageGap : PERSON_GAP;
+      offsets.set(union.partnerId, x);
+    });
+    const marriageGap = Math.max(...hub.unions.map((union) => union.marriageGap));
+    return {
+      kind: "couple",
+      width: offsets.get(members[members.length - 1]) - offsets.get(members[0]) + SLOT,
+      cx: 0,
+      gen: generation,
+      members,
+      mainPersonId: hub.personId,
+      originOf,
+      marriageGap,
+      offsets,
+      anchorX(id) {
+        return this.cx + (this.offsets?.get(id) ?? 0);
+      },
+      dropX() {
+        return this.cx;
+      }
+    };
+  }
+  function createHubFamilyBox(top, hub) {
+    const children = hub.unions.flatMap((union) => union.children);
+    return {
+      kind: "family",
+      width: top.width,
+      cx: 0,
+      gen: top.gen,
+      members: [...top.members],
+      mainPersonId: hub.personId,
+      top,
+      children,
+      hub,
+      anchorX(id) {
+        return top.anchorX(id);
+      },
+      dropX() {
+        return top.dropX();
+      }
+    };
+  }
   function createFamilyBox(top, children, mainPersonId) {
     const childrenWidth = children.reduce((sum, child, index) => sum + child.width + (index === 0 ? 0 : SIBLING_GAP), 0);
     const width = Math.max(top.width, childrenWidth || top.width);
@@ -793,6 +843,38 @@
     const hasParents = (personId) => parentUnionByChild.has(personId);
     const isRootUnion = (union) => union.partners.every((partnerId) => !hasParents(partnerId));
     const unionSortKey2 = (union) => `${Math.min(...union.partners.map((id) => graph.persons.get(id)?.generation ?? 0))}:${union.partners.join("|")}:${union.id}`;
+    const coupleUnionsOf = (personId) => (unionsByPartner.get(personId) ?? []).filter((union) => union.partners.length === 2);
+    const hubPeople = new Set(
+      [...graph.persons.keys()].filter((personId) => coupleUnionsOf(personId).length >= 2)
+    );
+    const hubUnionSortKey = (union) => `${String(union.order ?? Number.MAX_SAFE_INTEGER).padStart(12, "0")}:${union.id}`;
+    const reservedForHub = (union, personId) => union.partners.length === 2 && !hubPeople.has(personId) && union.partners.some((partnerId) => partnerId !== personId && hubPeople.has(partnerId));
+    const buildChildBoxes = (union) => {
+      const children = [];
+      for (const childId of sortedChildren(graph, union.id)) {
+        const child = graph.persons.get(childId);
+        if (!child) continue;
+        const childUnions = (unionsByPartner.get(childId) ?? []).filter(
+          (childUnion) => childUnion.id !== union.id && !visitedUnions.has(childUnion.id) && !reservedForHub(childUnion, childId)
+        ).sort((a, b) => unionSortKey2(a).localeCompare(unionSortKey2(b)));
+        if (childUnions.length > 0 && !visitedMainPeople.has(childId)) {
+          visitedMainPeople.add(childId);
+          if (hubPeople.has(childId) && childUnions.filter((u) => u.partners.length === 2).length >= 2) {
+            const hubFamily = buildHub(childId, childUnions);
+            if (hubFamily) children.push(hubFamily);
+            continue;
+          }
+          for (const childUnion of childUnions) {
+            const childFamily = buildFamily(childUnion, childId);
+            if (childFamily) children.push(childFamily);
+          }
+        } else if (!visitedMainPeople.has(childId)) {
+          visitedMainPeople.add(childId);
+          children.push(createPersonBox(childId, child.generation ?? 0));
+        }
+      }
+      return children;
+    };
     const buildFamily = (union, mainPersonId) => {
       if (visitedUnions.has(union.id)) return null;
       visitedUnions.add(union.id);
@@ -809,24 +891,46 @@
       }
       if (mainPersonId) visitedMainPeople.add(mainPersonId);
       else union.partners.forEach((partnerId) => visitedMainPeople.add(partnerId));
-      const children = [];
-      for (const childId of sortedChildren(graph, union.id)) {
-        const child = graph.persons.get(childId);
-        if (!child) continue;
-        const childUnions = (unionsByPartner.get(childId) ?? []).filter((childUnion) => childUnion.id !== union.id && !visitedUnions.has(childUnion.id)).sort((a, b) => unionSortKey2(a).localeCompare(unionSortKey2(b)));
-        if (childUnions.length > 0 && !visitedMainPeople.has(childId)) {
-          visitedMainPeople.add(childId);
-          for (const childUnion of childUnions) {
-            const childFamily = buildFamily(childUnion, childId);
-            if (childFamily) children.push(childFamily);
-          }
-        } else if (!visitedMainPeople.has(childId)) {
-          visitedMainPeople.add(childId);
-          children.push(createPersonBox(childId, child.generation ?? 0));
-        }
-      }
-      return createFamilyBox(top, children, mainId);
+      return createFamilyBox(top, buildChildBoxes(union), mainId);
     };
+    const buildHub = (personId, unions) => {
+      const hubUnions = unions.filter((union) => union.partners.length === 2 && !visitedUnions.has(union.id)).sort((a, b) => hubUnionSortKey(a).localeCompare(hubUnionSortKey(b)));
+      if (hubUnions.length < 2) return null;
+      hubUnions.forEach((union) => visitedUnions.add(union.id));
+      visitedMainPeople.add(personId);
+      const generation = Math.max(
+        ...hubUnions.flatMap((union) => union.partners.map((id) => graph.persons.get(id)?.generation ?? 0))
+      );
+      const spouses = hubUnions.map((union) => union.partners.find((partnerId) => partnerId !== personId));
+      const originOf = spouses.find((spouseId) => hasParents(spouseId));
+      spouses.forEach((spouseId) => {
+        if (!hasParents(spouseId)) visitedMainPeople.add(spouseId);
+      });
+      const hub = {
+        personId,
+        unions: hubUnions.map((union, index) => ({
+          unionId: union.id,
+          partnerId: spouses[index],
+          marriageGap: marriageGapForUnion(graph, parentUnionByChild, union, spouses[index] === originOf ? originOf : void 0),
+          children: []
+        }))
+      };
+      const top = createHubTopBox(hub, generation, originOf);
+      if (top.originOf) {
+        pendingOriginLinks.push({ couple: top, sharedPersonId: top.originOf });
+      }
+      hub.unions.forEach((group, index) => {
+        group.children = buildChildBoxes(hubUnions[index]);
+      });
+      return createHubFamilyBox(top, hub);
+    };
+    const rootHubPeople = [...hubPeople].filter((personId) => !hasParents(personId)).sort(
+      (a, b) => (graph.persons.get(a)?.generation ?? 0) - (graph.persons.get(b)?.generation ?? 0) || a.localeCompare(b)
+    );
+    for (const personId of rootHubPeople) {
+      const root = buildHub(personId, coupleUnionsOf(personId));
+      if (root) roots.push(root);
+    }
     for (const union of [...graph.unions.values()].sort((a, b) => unionSortKey2(a).localeCompare(unionSortKey2(b)))) {
       if (!isRootUnion(union)) continue;
       const root = buildFamily(union);
@@ -1193,6 +1297,14 @@
       box.width = (box.marriageGap ?? BASE_MARRIAGE_GAP) + SLOT;
       return box.width;
     }
+    if (box.kind === "family" && box.hub) {
+      for (const group of box.hub.unions) group.children.forEach(measureBox);
+      const geometry = computeHubGeometry(box);
+      box._childrenW = geometry.right - geometry.left;
+      box._topW = box.top ? box.top.width : 0;
+      box.width = geometry.right - geometry.left;
+      return box.width;
+    }
     if (box.kind === "family") {
       const topW = box.top ? measureBox(box.top) : 0;
       const children = box.children ?? [];
@@ -1204,10 +1316,77 @@
     }
     return box.width;
   }
+  function computeHubGeometry(box) {
+    const hub = box.hub;
+    const [first, ...rest] = hub.unions;
+    const offsets = /* @__PURE__ */ new Map();
+    offsets.set(hub.personId, 0);
+    offsets.set(first.partnerId, -first.marriageGap);
+    let x = 0;
+    rest.forEach((union, index) => {
+      x += index === 0 ? union.marriageGap : PERSON_GAP;
+      offsets.set(union.partnerId, x);
+    });
+    const groupWidths = hub.unions.map((union) => union.children.length ? siblingRowWidth(union.children) : 0);
+    const centerOf = (index) => (offsets.get(hub.unions[index].partnerId) + 0) / 2;
+    let previousWithChildren = groupWidths[0] > 0 ? 0 : -1;
+    for (let k = 1; k < hub.unions.length; k++) {
+      if (groupWidths[k] === 0) continue;
+      if (previousWithChildren < 0) {
+        previousWithChildren = k;
+        continue;
+      }
+      const reference = previousWithChildren;
+      previousWithChildren = k;
+      const minCenter = centerOf(reference) + (groupWidths[reference] + groupWidths[k]) / 2 + SIBLING_EDGE_GAP;
+      const shortfall = minCenter - centerOf(k);
+      if (shortfall <= 0.01) continue;
+      const shiftLeft = k === 1 ? shortfall : 0;
+      const shiftRight = shortfall * 2 - shiftLeft;
+      if (shiftLeft > 0) offsets.set(first.partnerId, offsets.get(first.partnerId) - shiftLeft);
+      for (let j = k; j < hub.unions.length; j++) {
+        const partnerId = hub.unions[j].partnerId;
+        offsets.set(partnerId, offsets.get(partnerId) + shiftRight);
+      }
+    }
+    const groupCenters = hub.unions.map((_, index) => centerOf(index));
+    const memberXs = [...offsets.values()];
+    let left = Math.min(...memberXs) - SLOT / 2;
+    let right = Math.max(...memberXs) + SLOT / 2;
+    groupCenters.forEach((center, index) => {
+      if (groupWidths[index] === 0) return;
+      left = Math.min(left, center - groupWidths[index] / 2);
+      right = Math.max(right, center + groupWidths[index] / 2);
+    });
+    return { offsets, groupCenters, groupWidths, left, right };
+  }
+  function placeHubFamily(box, centerX) {
+    const hub = box.hub;
+    const top = box.top;
+    const geometry = computeHubGeometry(box);
+    const hubX = centerX - (geometry.left + geometry.right) / 2;
+    top.cx = hubX;
+    top.offsets = geometry.offsets;
+    top.width = Math.max(...geometry.offsets.values()) - Math.min(...geometry.offsets.values()) + SLOT;
+    box.cx = centerX;
+    box.width = geometry.right - geometry.left;
+    hub.unions.forEach((union, index) => {
+      if (union.children.length === 0) return;
+      let left = hubX + geometry.groupCenters[index] - geometry.groupWidths[index] / 2;
+      for (const child of union.children) {
+        placeBoxAtSiblingRowLeft(child, left);
+        left += siblingRowBoxWidth(child) + SIBLING_EDGE_GAP;
+      }
+    });
+  }
   function placeBox(box, centerX) {
     box.cx = centerX;
     if (box.kind === "person" || box.kind === "couple") return;
     if (box.kind !== "family") return;
+    if (box.hub) {
+      placeHubFamily(box, centerX);
+      return;
+    }
     const children = box.children ?? [];
     if (children.length === 0) {
       if (box.top) placeBox(box.top, centerX);
@@ -1989,7 +2168,11 @@
           const fixed = leftHasParents ? left : right;
           const free = leftHasParents ? right : left;
           const side = (free.x ?? 0) >= (fixed.x ?? 0) ? 1 : -1;
-          free.x = (fixed.x ?? 0) + side * marriageGapForGraphUnion(graph, union);
+          const minGap = marriageGapForGraphUnion(graph, union);
+          const fixedIsHub = (childbearingUnionCount.get(fixed.id) ?? 0) > 1;
+          if (!fixedIsHub || Math.abs((free.x ?? 0) - (fixed.x ?? 0)) < minGap - 0.5) {
+            free.x = (fixed.x ?? 0) + side * minGap;
+          }
           const newCenter = ((fixed.x ?? 0) + (free.x ?? 0)) / 2;
           const dx2 = newCenter - childCenter;
           for (const childId of childIds) {
@@ -2005,7 +2188,10 @@
           const fixed = leftShared ? left : right;
           const free = leftShared ? right : left;
           const side = (free.x ?? 0) >= (fixed.x ?? 0) ? 1 : -1;
-          free.x = (fixed.x ?? 0) + side * marriageGapForGraphUnion(graph, union);
+          const minGap = marriageGapForGraphUnion(graph, union);
+          if (Math.abs((free.x ?? 0) - (fixed.x ?? 0)) < minGap - 0.5) {
+            free.x = (fixed.x ?? 0) + side * minGap;
+          }
           const newCenter = ((fixed.x ?? 0) + (free.x ?? 0)) / 2;
           const dx2 = newCenter - childCenter;
           for (const childId of childIds) {
@@ -2733,6 +2919,7 @@
     const visit = (box) => {
       box.children?.forEach(visit);
       if (box.kind !== "family" || !box.top || !box.children || box.children.length === 0) return;
+      if (box.hub) return;
       placeBox(box.top, familyDropX(box));
     };
     roots.forEach(visit);
@@ -2849,6 +3036,7 @@
   var SIBSHIP_DROP2 = NODE_SIZE * 1.25;
   var ROUTED_MARRIAGE_DROP2 = NODE_SIZE * 1.65;
   var MIN_PARENT_DROP2 = NODE_SIZE * 0.65;
+  var MARRIAGE_MARK_SPACING = 8;
   function buildLayoutResult(graph, input) {
     const displayGraph = graphForDisplayRouting(graph);
     const nodes = [...displayGraph.persons.values()].map((person) => ({
@@ -2941,7 +3129,8 @@
         union.id,
         {
           id: union.id,
-          partners: normalizePartners(union)
+          partners: normalizePartners(union),
+          ...Number.isFinite(union.order) ? { order: union.order } : {}
         }
       ])),
       childrenMap: new Map(childrenMap.map(([unionId, childIds]) => [unionId, [...childIds]]))
@@ -3035,6 +3224,8 @@
         const [left, right] = partners[0].x <= partners[1].x ? [partners[0], partners[1]] : [partners[1], partners[0]];
         const points = marriageLinePoints(graph, left, right, parentIds, childIds);
         marriageLines.set(union.id, points);
+        const inputUnion = inputUnions.get(union.id);
+        const status = normalizeUnionStatus(inputUnion?.status);
         segments.push({
           id: `${union.id}:marriage`,
           type: "marriage",
@@ -3048,7 +3239,9 @@
             personIds: parentIds
           },
           points,
-          doubleLine: !!inputUnions.get(union.id)?.consanguineous
+          doubleLine: !!inputUnion?.consanguineous,
+          status,
+          marks: buildMarriageMarks(graph, union.id, status, points, childIds.length > 0, left, right)
         });
       }
       const kids = childIds.map((id) => graph.persons.get(id)).filter(hasCoordinates);
@@ -3170,6 +3363,31 @@
       }
     }
     return applyParentDropDetours(segments);
+  }
+  function normalizeUnionStatus(status) {
+    return status === "separated" || status === "divorced" ? status : "partner";
+  }
+  function buildMarriageMarks(graph, unionId, status, points, hasChildren, left, right) {
+    if (status === "partner") return [];
+    const descent = marriageDescentStart(points);
+    if (!descent) return [];
+    const unionCount = (personId) => [...graph.unions.values()].filter((union) => union.id !== unionId && union.partners.includes(personId)).length;
+    const outerSide = unionCount(left.id) > unionCount(right.id) ? "right" : "left";
+    const outer = outerSide === "left" ? left : right;
+    const lineY = descent.y;
+    const routed = Math.abs(lineY - left.y) >= 0.5;
+    const edgeX = routed ? outer.x : outerSide === "left" ? outer.x + R : outer.x - R;
+    const dropX = hasChildren ? descent.x : (left.x + right.x) / 2;
+    const centerX = hasChildren ? (edgeX + dropX) / 2 : dropX;
+    const available = Math.abs(dropX - edgeX);
+    const count = status === "divorced" ? 2 : 1;
+    const spacing = Math.min(MARRIAGE_MARK_SPACING, Math.max(6, available / 3));
+    const marks = [];
+    for (let index = 0; index < count; index++) {
+      const offset = (index - (count - 1) / 2) * spacing;
+      marks.push({ kind: status, x: centerX + offset, y: lineY });
+    }
+    return marks;
   }
   function marriageDescentStart(points) {
     if (!points || points.length < 2) return void 0;
@@ -3389,7 +3607,11 @@
   }
   function layoutInputToGraph(input) {
     const childCountByUnion = new Map(input.childrenMap.map(([unionId, childIds]) => [unionId, childIds.length]));
-    const relevantUnions = input.unions.map((union) => ({ id: union.id, partners: normalizePartners(union) })).filter((union) => union.partners.length > 1 || (childCountByUnion.get(union.id) ?? 0) > 0);
+    const relevantUnions = input.unions.map((union) => ({
+      id: union.id,
+      partners: normalizePartners(union),
+      ...Number.isFinite(union.order) ? { order: union.order } : {}
+    })).filter((union) => union.partners.length > 1 || (childCountByUnion.get(union.id) ?? 0) > 0);
     const relevantUnionIds = new Set(relevantUnions.map((union) => union.id));
     return {
       persons: new Map(input.persons.map((person) => [

@@ -86,7 +86,11 @@ export function validateLayoutInput(input: LayoutInput): void {
 function layoutInputToGraph(input: LayoutInput): PedigreeGraph {
   const childCountByUnion = new Map(input.childrenMap.map(([unionId, childIds]) => [unionId, childIds.length]));
   const relevantUnions = input.unions
-    .map((union) => ({ id: union.id, partners: normalizePartners(union) }))
+    .map((union) => ({
+      id: union.id,
+      partners: normalizePartners(union),
+      ...(Number.isFinite(union.order) ? { order: union.order } : {})
+    }))
     .filter((union) => union.partners.length > 1 || (childCountByUnion.get(union.id) ?? 0) > 0);
   const relevantUnionIds = new Set(relevantUnions.map((union) => union.id));
 

@@ -61,6 +61,96 @@ test("browser smoke renders stable pedigree scenarios", async (t) => {
       page.once("dialog", async (dialog) => dialog.accept("2"));
       await clickButton(page, "女儿 D");
     }));
+
+    // 一女两男：女先证者与两任丈夫各育一子女（2026-10-27 前会触发布局不变量失败、画布塌缩）
+    scenarioMetrics.push(await runScenario(browser, baseUrl, "05-woman-two-husbands", async (page) => {
+      await clickButton(page, "＋ 添加先证者");
+      await page.selectOption("#personSex", "female");
+      await clickButton(page, "配偶 E");
+      await clickButton(page, "配偶 E");
+      page.once("dialog", async (dialog) => dialog.accept("1"));
+      await clickButton(page, "儿子 C");
+      page.once("dialog", async (dialog) => dialog.accept("2"));
+      await clickButton(page, "女儿 D");
+    }));
+
+    // 先证者之母再婚：母亲与前夫、现夫各一子（同母异父弟）
+    scenarioMetrics.push(await runScenario(browser, baseUrl, "06-mother-remarried", async (page) => {
+      await clickButton(page, "＋ 添加先证者");
+      await page.selectOption("#personSex", "male");
+      await clickButton(page, "父亲 F");
+      await clickButton(page, "母亲 M");
+      await clickPersonByLabel(page, "母");
+      await clickButton(page, "配偶 E");
+      page.once("dialog", async (dialog) => dialog.accept("2"));
+      await clickButton(page, "儿子 C");
+    }));
+
+    // 离婚 / 分居：通过右侧"婚姻关系"面板改状态，第一段离婚、第二段分居
+    scenarioMetrics.push(await runScenario(browser, baseUrl, "07-divorce-marks", async (page) => {
+      await clickButton(page, "＋ 添加先证者");
+      await page.selectOption("#personSex", "male");
+      await clickButton(page, "配偶 E");
+      await clickButton(page, "配偶 E");
+      page.once("dialog", async (dialog) => dialog.accept("1"));
+      await clickButton(page, "儿子 C");
+      page.once("dialog", async (dialog) => dialog.accept("2"));
+      await clickButton(page, "女儿 D");
+      await page.locator(".marriage-row").nth(0).locator(".marriage-status").selectOption("divorced");
+      await page.locator(".marriage-row").nth(1).locator(".marriage-status").selectOption("separated");
+      assert.match(await page.locator("#statusLine").innerText(), /分居/);
+      await page.locator(".marriage-row").nth(0).locator(".marriage-year").nth(1).fill("2010");
+
+      // 家族史文字应写出先证者的婚姻情况；导出 SVG 应带斜杠及其样式
+      await clickButton(page, "📋 生成家族史文字");
+      const history = await page.locator("#historyText").inputValue();
+      assert.match(history, /先证者有 2 段婚姻（已离婚 1 段，分居 1 段）/);
+      await clickButton(page, "关闭");
+      const exported = String(await page.evaluate("buildExportSvg().svg.outerHTML"));
+      assert.equal((exported.match(/class="marriage-mark marriage-mark-/g) ?? []).length, 3);
+      assert.match(exported, /\.marriage-mark\{stroke:#2f3a42/);
+
+      // 撤销：第一次撤销年份输入，第二次撤销状态修改（分居 → 在婚），斜杠减少 1 道
+      // （撤销后会取消选中，需重新点击先证者才能看到婚姻关系面板）
+      await clickButton(page, "↶ 撤销");
+      assert.equal(await page.locator("#pedigreeSvg .marriage-mark").count(), 3);
+      await clickPersonByLabel(page, "先证者");
+      assert.equal(await page.locator(".marriage-row").nth(0).locator(".marriage-year").nth(1).inputValue(), "");
+      await clickButton(page, "↶ 撤销");
+      assert.equal(await page.locator("#pedigreeSvg .marriage-mark").count(), 2);
+      await clickButton(page, "↷ 重做");
+      await clickButton(page, "↷ 重做");
+      assert.equal(await page.locator("#pedigreeSvg .marriage-mark").count(), 3);
+      await clickPersonByLabel(page, "先证者");
+    }));
+
+    // 加载旧格式项目（union 无 status 字段）应按在婚处理，不报错
+    scenarioMetrics.push(await runScenario(browser, baseUrl, "08-legacy-project-load", async (page) => {
+      const legacyProject = {
+        schemaVersion: 2,
+        version: "6.0.3",
+        title: "旧项目",
+        people: [
+          { id: "p1", name: "先证者", sex: "female", proband: true, order: 1 },
+          { id: "p2", name: "前夫", sex: "male", order: 2 },
+          { id: "p3", name: "现夫", sex: "male", order: 3 },
+          { id: "p4", name: "儿子", sex: "male", order: 4 }
+        ],
+        unions: [
+          { id: "u1", partnerIds: ["p2", "p1"] },
+          { id: "u2", partnerIds: ["p3", "p1"] }
+        ],
+        parentages: [{ id: "pa1", unionId: "u1", parentIds: ["p2", "p1"], childId: "p4", kind: "biological" }],
+        phenotypes: [], geneticFindings: [], pregnancies: [],
+        settings: {}, layout: { positions: {} }
+      };
+      await page.setInputFiles("#loadJsonInput", {
+        name: "legacy.json",
+        mimeType: "application/json",
+        buffer: Buffer.from(JSON.stringify(legacyProject), "utf8")
+      });
+      await page.waitForFunction(() => document.querySelectorAll(".person-symbol").length === 4);
+    }));
   } finally {
     await browser?.close();
     await server.close();
@@ -115,7 +205,79 @@ test("browser smoke renders stable pedigree scenarios", async (t) => {
   assertNoSymbolOverlaps(halfSiblings);
   assertNoTextSymbolOverlaps(halfSiblings);
   assertNoTextLineOverlaps(halfSiblings);
+
+  const womanTwoHusbands = scenarioMetrics.find((metrics) => metrics.name === "05-woman-two-husbands");
+  assert.ok(womanTwoHusbands);
+  assert.equal(womanTwoHusbands.symbolCount, 5);
+  assert.equal(womanTwoHusbands.marriageLineCount, 2, "两段婚姻都应画出婚配线");
+  assert.ok(womanTwoHusbands.lineCount >= 6);
+  assert.doesNotMatch(womanTwoHusbands.status, /布局失败/);
+  assertNoInvalidSvgAttributes(womanTwoHusbands);
+  assertNoSymbolOverlaps(womanTwoHusbands);
+  assertNoTextSymbolOverlaps(womanTwoHusbands);
+  assertNoTextLineOverlaps(womanTwoHusbands);
+
+  const motherRemarried = scenarioMetrics.find((metrics) => metrics.name === "06-mother-remarried");
+  assert.ok(motherRemarried);
+  assert.equal(motherRemarried.symbolCount, 5);
+  assert.equal(motherRemarried.marriageLineCount, 2);
+  assert.doesNotMatch(motherRemarried.status, /布局失败/);
+  assertNoInvalidSvgAttributes(motherRemarried);
+  assertNoSymbolOverlaps(motherRemarried);
+  assertNoTextSymbolOverlaps(motherRemarried);
+  assertNoTextLineOverlaps(motherRemarried);
+
+  const divorceMarks = scenarioMetrics.find((metrics) => metrics.name === "07-divorce-marks");
+  assert.ok(divorceMarks);
+  assert.equal(divorceMarks.symbolCount, 5);
+  assert.equal(divorceMarks.marriageLineCount, 2);
+  assert.equal(divorceMarks.marriageMarkCount, 3, "离婚 2 道 + 分居 1 道斜杠");
+  assert.ok(divorceMarks.marriageRows.length === 2);
+  assert.deepEqual(divorceMarks.marriageRows.map((row) => row.status), ["divorced", "separated"]);
+  assert.equal(divorceMarks.marriageRows[0].endYear, "2010");
+  assert.ok(divorceMarks.textLabels.some((label) => label.includes("离婚")));
+  assert.ok(divorceMarks.textLabels.some((label) => label.includes("分居")));
+  assertNoInvalidSvgAttributes(divorceMarks);
+  assertNoSymbolOverlaps(divorceMarks);
+  assertNoTextSymbolOverlaps(divorceMarks);
+  assertNoTextLineOverlaps(divorceMarks);
+  assertMarksOnMarriageLines(divorceMarks);
+
+  const legacy = scenarioMetrics.find((metrics) => metrics.name === "08-legacy-project-load");
+  assert.ok(legacy);
+  assert.equal(legacy.symbolCount, 4);
+  assert.equal(legacy.marriageLineCount, 2);
+  assert.equal(legacy.marriageMarkCount, 0);
+  assert.doesNotMatch(legacy.status, /失败|错误/);
+  assertNoInvalidSvgAttributes(legacy);
+  assertNoSymbolOverlaps(legacy);
 });
+
+async function clickPersonByLabel(page: Page, label: string) {
+  // 点击符号本身而不是整个 <g>：先证者箭头会把组的外接框拉大，中心可能落在空白处
+  await page.locator("g.node-hit")
+    .filter({ has: page.locator("text", { hasText: new RegExp(`^${label}$`) }) })
+    .first()
+    .locator(".person-symbol")
+    .click();
+}
+
+// 每道斜杠的中心都必须落在某条婚配线的水平段上，且不与子女下降线重合
+function assertMarksOnMarriageLines(metrics: ScenarioMetrics) {
+  const marriages = metrics.relationshipSegments.filter((segment) => segment.className.includes("marriage-line"));
+  const descents = metrics.relationshipSegments.filter((segment) => segment.className.includes("descent-line"));
+  for (const mark of metrics.marriageMarks) {
+    const onLine = marriages.some((segment) =>
+      Math.abs(segment.from.y - segment.to.y) < 0.5 &&
+      Math.abs(mark.y - segment.from.y) < 1 &&
+      mark.x > Math.min(segment.from.x, segment.to.x) &&
+      mark.x < Math.max(segment.from.x, segment.to.x)
+    );
+    assert.ok(onLine, `${metrics.name} mark at ${mark.x},${mark.y} is not on a marriage line`);
+    const hitsDescent = descents.some((segment) => Math.abs(segment.from.x - mark.x) < 4 && Math.abs(segment.to.x - mark.x) < 4);
+    assert.ok(!hitsDescent, `${metrics.name} mark at ${mark.x},${mark.y} overlaps a descent line`);
+  }
+}
 
 async function runScenario(
   browser: Awaited<ReturnType<typeof chromium.launch>>,
@@ -178,6 +340,18 @@ async function collectMetrics(page: Page, name: string): Promise<ScenarioMetrics
       personFormHidden: document.querySelector("#personForm")?.hidden ?? false,
       symbolCount: document.querySelectorAll(".person-symbol").length,
       lineCount: document.querySelectorAll(".marriage-line,.descent-line,.sibling-line,.individual-line").length,
+      marriageLineCount: document.querySelectorAll("#pedigreeSvg .marriage-line").length,
+      marriageMarkCount: document.querySelectorAll("#pedigreeSvg .marriage-mark").length,
+      marriageMarks: [...document.querySelectorAll("#pedigreeSvg .marriage-mark")].map((element) => {
+        const [segment] = relationshipSegments(element);
+        return segment ? { x: round((segment.from.x + segment.to.x) / 2), y: round((segment.from.y + segment.to.y) / 2) } : { x: NaN, y: NaN };
+      }),
+      marriageRows: [...document.querySelectorAll(".marriage-row")].map((row) => ({
+        head: row.querySelector(".marriage-row-head")?.textContent ?? "",
+        status: row.querySelector(".marriage-status")?.value ?? "",
+        startYear: row.querySelectorAll(".marriage-year")[0]?.value ?? "",
+        endYear: row.querySelectorAll(".marriage-year")[1]?.value ?? ""
+      })),
       generationLabels: [...document.querySelectorAll(".generation-label")].map((element) => element.textContent ?? ""),
       textLabels: [...document.querySelectorAll("text")].map((element) => element.textContent ?? ""),
       symbolRects: [...document.querySelectorAll(".person-symbol")].map(rectOf),
@@ -406,6 +580,10 @@ interface ScenarioMetrics {
   hasCopyPngButton: boolean;
   symbolCount: number;
   lineCount: number;
+  marriageLineCount: number;
+  marriageMarkCount: number;
+  marriageMarks: PointMetrics[];
+  marriageRows: Array<{ head: string; status: string; startYear: string; endYear: string }>;
   generationLabels: string[];
   textLabels: string[];
   symbolRects: RectMetrics[];

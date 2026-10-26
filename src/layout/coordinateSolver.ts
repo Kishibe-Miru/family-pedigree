@@ -29,6 +29,15 @@ export function measureBox(box: Box): number {
     return box.width;
   }
 
+  if (box.kind === "family" && box.hub) {
+    for (const group of box.hub.unions) group.children.forEach(measureBox);
+    const geometry = computeHubGeometry(box);
+    box._childrenW = geometry.right - geometry.left;
+    box._topW = box.top ? box.top.width : 0;
+    box.width = geometry.right - geometry.left;
+    return box.width;
+  }
+
   if (box.kind === "family") {
     const topW = box.top ? measureBox(box.top) : 0;
     const children = box.children ?? [];
@@ -43,11 +52,98 @@ export function measureBox(box: Box): number {
   return box.width;
 }
 
+/* ============================================================
+   婚姻枢纽盒子：[配偶1, 本人, 配偶2, …]，每段婚姻的子女组居中于该段两人中点。
+   相邻子女组之间至少留 SIBLING_EDGE_GAP；不够时把右侧配偶（及其后的成员）外推。
+   ============================================================ */
+interface HubGeometry {
+  /** 各成员相对枢纽本人的 x 偏移 */
+  offsets: Map<string, number>;
+  /** 各段婚姻子女组中心相对枢纽本人的 x 偏移 */
+  groupCenters: number[];
+  groupWidths: number[];
+  left: number;
+  right: number;
+}
+
+function computeHubGeometry(box: Box): HubGeometry {
+  const hub = box.hub!;
+  const [first, ...rest] = hub.unions;
+  const offsets = new Map<string, number>();
+  offsets.set(hub.personId, 0);
+  offsets.set(first.partnerId, -first.marriageGap);
+  let x = 0;
+  rest.forEach((union, index) => {
+    x += index === 0 ? union.marriageGap : PERSON_GAP;
+    offsets.set(union.partnerId, x);
+  });
+
+  const groupWidths = hub.unions.map((union) => union.children.length ? siblingRowWidth(union.children) : 0);
+  const centerOf = (index: number) => (offsets.get(hub.unions[index].partnerId)! + 0) / 2;
+  // 从左到右保证相邻子女组不重叠。配偶外移 d，该段子女组中心随之移动 d/2：
+  // 第 1、2 段之间的不足由两侧配偶平分外移（画面对称）；更靠右的段只外移右侧配偶。
+  // 没有子女的段不占子女行空间，只和左侧最近的有子女段比较。
+  let previousWithChildren = groupWidths[0] > 0 ? 0 : -1;
+  for (let k = 1; k < hub.unions.length; k++) {
+    if (groupWidths[k] === 0) continue;
+    if (previousWithChildren < 0) { previousWithChildren = k; continue; }
+    const reference = previousWithChildren;
+    previousWithChildren = k;
+    const minCenter = centerOf(reference) + (groupWidths[reference] + groupWidths[k]) / 2 + SIBLING_EDGE_GAP;
+    const shortfall = minCenter - centerOf(k);
+    if (shortfall <= 0.01) continue;
+    const shiftLeft = k === 1 ? shortfall : 0;
+    const shiftRight = shortfall * 2 - shiftLeft;
+    if (shiftLeft > 0) offsets.set(first.partnerId, offsets.get(first.partnerId)! - shiftLeft);
+    for (let j = k; j < hub.unions.length; j++) {
+      const partnerId = hub.unions[j].partnerId;
+      offsets.set(partnerId, offsets.get(partnerId)! + shiftRight);
+    }
+  }
+  // 第一段婚姻的子女组若比婚配间距宽，不会和谁冲突（左侧没有别的子女组），保持居中即可
+
+  const groupCenters = hub.unions.map((_, index) => centerOf(index));
+  const memberXs = [...offsets.values()];
+  let left = Math.min(...memberXs) - SLOT / 2;
+  let right = Math.max(...memberXs) + SLOT / 2;
+  groupCenters.forEach((center, index) => {
+    if (groupWidths[index] === 0) return;
+    left = Math.min(left, center - groupWidths[index] / 2);
+    right = Math.max(right, center + groupWidths[index] / 2);
+  });
+  return { offsets, groupCenters, groupWidths, left, right };
+}
+
+function placeHubFamily(box: Box, centerX: number) {
+  const hub = box.hub!;
+  const top = box.top!;
+  const geometry = computeHubGeometry(box);
+  const hubX = centerX - (geometry.left + geometry.right) / 2;
+  top.cx = hubX;
+  top.offsets = geometry.offsets;
+  top.width = Math.max(...geometry.offsets.values()) - Math.min(...geometry.offsets.values()) + SLOT;
+  box.cx = centerX;
+  box.width = geometry.right - geometry.left;
+
+  hub.unions.forEach((union, index) => {
+    if (union.children.length === 0) return;
+    let left = hubX + geometry.groupCenters[index] - geometry.groupWidths[index] / 2;
+    for (const child of union.children) {
+      placeBoxAtSiblingRowLeft(child, left);
+      left += siblingRowBoxWidth(child) + SIBLING_EDGE_GAP;
+    }
+  });
+}
+
 export function placeBox(box: Box, centerX: number) {
   box.cx = centerX;
 
   if (box.kind === "person" || box.kind === "couple") return;
   if (box.kind !== "family") return;
+  if (box.hub) {
+    placeHubFamily(box, centerX);
+    return;
+  }
 
   const children = box.children ?? [];
   if (children.length === 0) {
@@ -1054,7 +1150,12 @@ function alignGraphParentDrops(graph: PedigreeGraph, originLinks: OriginLink[] =
         const fixed = leftHasParents ? left : right;
         const free = leftHasParents ? right : left;
         const side = (free.x ?? 0) >= (fixed.x ?? 0) ? 1 : -1;
-        free.x = (fixed.x ?? 0) + side * marriageGapForGraphUnion(graph, union);
+        const minGap = marriageGapForGraphUnion(graph, union);
+        // 有父母的一方是婚姻枢纽时，枢纽盒子已按子女组宽度加大了间距：只补足、不缩小
+        const fixedIsHub = (childbearingUnionCount.get(fixed.id) ?? 0) > 1;
+        if (!fixedIsHub || Math.abs((free.x ?? 0) - (fixed.x ?? 0)) < minGap - 0.5) {
+          free.x = (fixed.x ?? 0) + side * minGap;
+        }
         const newCenter = ((fixed.x ?? 0) + (free.x ?? 0)) / 2;
         const dx = newCenter - childCenter;
         for (const childId of childIds) {
@@ -1071,7 +1172,11 @@ function alignGraphParentDrops(graph: PedigreeGraph, originLinks: OriginLink[] =
         const fixed = leftShared ? left : right;
         const free = leftShared ? right : left;
         const side = (free.x ?? 0) >= (fixed.x ?? 0) ? 1 : -1;
-        free.x = (fixed.x ?? 0) + side * marriageGapForGraphUnion(graph, union);
+        // 枢纽盒子可能为了容纳较宽的子女组而加大婚配间距，这里只补足、不缩小
+        const minGap = marriageGapForGraphUnion(graph, union);
+        if (Math.abs((free.x ?? 0) - (fixed.x ?? 0)) < minGap - 0.5) {
+          free.x = (fixed.x ?? 0) + side * minGap;
+        }
         const newCenter = ((fixed.x ?? 0) + (free.x ?? 0)) / 2;
         const dx = newCenter - childCenter;
         for (const childId of childIds) {
@@ -2018,6 +2123,8 @@ function realignFamilyTops(roots: Box[]) {
   const visit = (box: Box) => {
     box.children?.forEach(visit);
     if (box.kind !== "family" || !box.top || !box.children || box.children.length === 0) return;
+    // 枢纽顶部没有单一下降点：各段婚姻的子女组由图级 alignGraphParentDrops 按段对齐
+    if (box.hub) return;
     placeBox(box.top, familyDropX(box));
   };
   roots.forEach(visit);

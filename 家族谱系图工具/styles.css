@@ -185,6 +185,7 @@ kbd {
   stroke: var(--node-ink); stroke-width: 2.2; fill: none; stroke-linecap: square;
 }
 .consanguineous { stroke-width: 1.6; }
+.marriage-mark { stroke: var(--node-ink); stroke-width: 2.2; stroke-linecap: round; }
 .person-symbol { stroke: var(--node-ink); stroke-width: 2.8; }
 .person-symbol.unaffected { fill: #fff; }
 .person-symbol.affected { fill: var(--node-ink); }
@@ -234,6 +235,17 @@ kbd {
 .tag button:hover { background: #1f4bb8; color: #fff; }
 
 .form-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+
+/* 婚姻关系列表（右侧面板） */
+.marriage-list { display: flex; flex-direction: column; gap: 8px; }
+.marriage-row { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #fff; display: flex; flex-direction: column; gap: 6px; }
+.marriage-row-head { font-size: 12px; font-weight: 600; color: var(--ink); }
+.marriage-row-fields { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 6px; }
+.marriage-row-fields select, .marriage-row-fields input {
+  font-family: inherit; font-size: 12px; color: var(--ink); min-width: 0;
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 7px; background: #fff;
+}
+.marriage-row-fields select:focus, .marriage-row-fields input:focus { outline: none; border-color: var(--accent); }
 
 /* scrollbars */
 .panel::-webkit-scrollbar { width: 8px; }

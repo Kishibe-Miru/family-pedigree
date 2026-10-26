@@ -93,7 +93,7 @@ function cacheElements() {
     "addOlderTwinBrotherBtn", "addYoungerTwinBrotherBtn", "addOlderTwinSisterBtn", "addYoungerTwinSisterBtn",
     "linkPartnerBtn", "optSnapDrag", "familyHistoryBtn",
     "historyDialog", "historyText", "copyHistoryBtn", "closeHistoryBtn",
-    "identicalRow", "personIdentical"
+    "identicalRow", "personIdentical", "marriageSection", "marriageList"
   ];
   ids.forEach((id) => (els[id] = document.getElementById(id)));
 }
@@ -333,6 +333,41 @@ function partnerUnions() {
   return state.project.unions.filter((u) => u.partnerIds.length === 2);
 }
 
+// 某人的全部配偶关系，按创建先后（union.order）排序：第 1 段、第 2 段……
+function unionsOfPerson(id) {
+  return partnerUnions()
+    .filter((u) => u.partnerIds.includes(id))
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+const UNION_STATUS_LABELS = { partner: "在婚", separated: "分居", divorced: "离婚" };
+function unionStatusLabel(status) { return UNION_STATUS_LABELS[status] || "在婚"; }
+
+function setUnionStatus(unionId, status) {
+  const union = getUnion(unionId);
+  if (!union || union.partnerIds.length !== 2) return;
+  const next = PedigreeDomain.normalizeUnionStatus(status, 2);
+  if (union.status === next) return;
+  state.formEditSnapshot = null;
+  pushHistory();
+  union.status = next;
+  // 斜杠坐标由引擎在婚配线段上算出：不需要重新排版，只需按当前坐标重算连线
+  refreshLayoutResultFromCurrentPeople();
+  refresh();
+  autosave();
+  setStatus(`婚姻状态已改为「${unionStatusLabel(next)}」`);
+}
+
+function setUnionYears(unionId, startYear, endYear) {
+  const union = getUnion(unionId);
+  if (!union) return;
+  const start = (startYear || "").trim();
+  const end = (endYear || "").trim();
+  if (start) union.startYear = start; else delete union.startYear;
+  if (end) union.endYear = end; else delete union.endYear;
+  autosave();
+}
+
 /* ============================================================
    录入动作
    ============================================================ */
@@ -435,10 +470,13 @@ function addChild(sex) {
 }
 
 function chooseCoParentForChild(parent) {
-  const partners = findPartners(parent.id);
+  const unions = unionsOfPerson(parent.id);
+  const partners = unions.map((u) => getPerson(u.partnerIds.find((id) => id !== parent.id))).filter(Boolean);
   if (partners.length === 0) return null;
   if (partners.length === 1) return partners[0];
-  const choices = partners.map((p, i) => `${i + 1}. ${displayPersonName(p)}`).join("\n");
+  const choices = partners.map((p, i) =>
+    `${i + 1}. ${displayPersonName(p)}（第 ${i + 1} 段婚姻 · ${unionStatusLabel(unions[i].status)}）`
+  ).join("\n");
   const answer = prompt(
     `请选择新子女的共同父母：\n\n0. 单亲 / 未知另一方\n${choices}`,
     "1"
@@ -844,7 +882,9 @@ function buildEngineLayoutInput() {
     unions: layoutUnions.map((union) => ({
       id: union.id,
       partners: [...union.partnerIds],
-      consanguineous: union.partnerIds.length === 2 ? areConsanguineous(union.partnerIds[0], union.partnerIds[1]) : false
+      consanguineous: union.partnerIds.length === 2 ? areConsanguineous(union.partnerIds[0], union.partnerIds[1]) : false,
+      status: union.status === "separated" || union.status === "divorced" ? union.status : "partner",
+      order: Number.isFinite(union.order) ? union.order : undefined
     })),
     childrenMap: [...childrenByUnion.entries()].filter(([unionId]) => layoutUnionIds.has(unionId))
   };
@@ -1055,7 +1095,7 @@ function renderForm() {
   const p = selectedPerson();
   els.emptySelection.hidden = Boolean(p);
   els.personForm.hidden = !p;
-  if (!p) return;
+  if (!p) { els.marriageList.innerHTML = ""; els.marriageSection.hidden = true; return; }
   els.personName.value = p.name || "";
   els.personSex.value = p.sex || "unknown";
   els.personAffectedStatus.value = p.affectedStatus || "unaffected";
@@ -1077,6 +1117,55 @@ function renderForm() {
     btn.addEventListener("click", () => removeDiagnosis(d));
     tag.appendChild(btn);
     els.diagnosisTags.appendChild(tag);
+  });
+  renderMarriageList(p);
+}
+
+// 右侧"婚姻关系"区：列出选中成员的每段婚姻，可改状态与年份
+function renderMarriageList(p) {
+  const unions = unionsOfPerson(p.id);
+  els.marriageSection.hidden = unions.length === 0;
+  els.marriageList.innerHTML = "";
+  unions.forEach((union, index) => {
+    const partner = getPerson(union.partnerIds.find((id) => id !== p.id));
+    const row = document.createElement("div");
+    row.className = "marriage-row";
+    row.dataset.union = union.id;
+
+    const head = document.createElement("div");
+    head.className = "marriage-row-head";
+    head.textContent = `第 ${index + 1} 段 · 与 ${displayPersonName(partner)}`;
+    row.appendChild(head);
+
+    const fields = document.createElement("div");
+    fields.className = "marriage-row-fields";
+
+    const select = document.createElement("select");
+    select.className = "marriage-status";
+    select.title = "婚姻状态";
+    Object.entries(UNION_STATUS_LABELS).forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value; option.textContent = label;
+      select.appendChild(option);
+    });
+    select.value = UNION_STATUS_LABELS[union.status] ? union.status : "partner";
+    select.addEventListener("change", () => setUnionStatus(union.id, select.value));
+    fields.appendChild(select);
+
+    const start = document.createElement("input");
+    start.type = "text"; start.className = "marriage-year"; start.placeholder = "结婚年";
+    start.title = "结婚年份（可选）";
+    start.value = union.startYear || "";
+    const end = document.createElement("input");
+    end.type = "text"; end.className = "marriage-year"; end.placeholder = "结束年";
+    end.title = "分居 / 离婚年份（可选）";
+    end.value = union.endYear || "";
+    [start, end].forEach((input) => input.addEventListener("input", () => setUnionYears(union.id, start.value, end.value)));
+    fields.appendChild(start);
+    fields.appendChild(end);
+
+    row.appendChild(fields);
+    els.marriageList.appendChild(row);
   });
 }
 
@@ -1469,6 +1558,7 @@ function buildExportSvg() {
 function exportStyles() {
   return `
   .marriage-line,.descent-line,.sibling-line,.individual-line{stroke:#2f3a42;stroke-width:2.2;fill:none;stroke-linecap:square}
+  .marriage-mark{stroke:#2f3a42;stroke-width:2.2;stroke-linecap:round}
   .person-symbol{stroke:#2f3a42;stroke-width:2.8}
   .person-symbol.unaffected{fill:#fff}
   .person-symbol.affected{fill:#2f3a42}
@@ -1703,8 +1793,48 @@ function buildFamilyHistory() {
     });
     lines.push(`家系内除先证者外共 ${affected.length} 名亲属记录为患病或疑似。是否符合家族聚集性，需结合诊断依据、信息来源、发病年龄及临床人员复核后判断。`);
   }
+  lines.push(...maritalHistoryLines(proband));
   lines.push("注：本段为结构化草稿，不替代临床复核；请补充信息来源、诊断依据、发病年龄、病程和资料缺失情况。");
   return lines.join("\n");
+}
+
+// 婚姻与再婚描述：父母离婚 / 分居、父母再婚及半同胞、先证者本人婚姻
+function maritalHistoryLines(proband) {
+  const lines = [];
+  const parents = findParents(proband.id);
+  const father = parents.find((p) => p.sex === "male");
+  const mother = parents.find((p) => p.sex === "female");
+  const parentUnion = parents.length === 2 ? findUnionByPartners(parents.map((p) => p.id)) : null;
+  if (parentUnion && (parentUnion.status === "divorced" || parentUnion.status === "separated")) {
+    const year = parentUnion.endYear ? `（${parentUnion.endYear} 年）` : "";
+    lines.push(`先证者父母已${unionStatusLabel(parentUnion.status)}${year}。`);
+  }
+  const describeRemarriage = (parent, label, halfTerm) => {
+    if (!parent) return;
+    const others = unionsOfPerson(parent.id).filter((u) => !parentUnion || u.id !== parentUnion.id);
+    if (others.length === 0) return;
+    const halfSiblings = state.project.parentages
+      .filter((pa) => others.some((u) => u.id === pa.unionId))
+      .map((pa) => getPerson(pa.childId)).filter(Boolean);
+    const affectedHalf = halfSiblings.filter((p) => p.affectedStatus === "affected" || p.affectedStatus === "suspected").length;
+    const ended = others.filter((u) => u.status === "divorced" || u.status === "separated").length;
+    let text = `${label}另有 ${others.length} 段婚姻`;
+    if (ended) text += `（其中 ${ended} 段已离婚或分居）`;
+    text += halfSiblings.length
+      ? `，育有${halfTerm}同胞 ${halfSiblings.length} 人${affectedHalf ? `（${affectedHalf} 人患病或疑似）` : ""}。`
+      : "，无子女记录。";
+    lines.push(text);
+  };
+  describeRemarriage(father, "父亲", "同父异母");
+  describeRemarriage(mother, "母亲", "同母异父");
+  const own = unionsOfPerson(proband.id);
+  if (own.length > 0) {
+    const divorced = own.filter((u) => u.status === "divorced").length;
+    const separated = own.filter((u) => u.status === "separated").length;
+    const detail = [divorced ? `已离婚 ${divorced} 段` : "", separated ? `分居 ${separated} 段` : ""].filter(Boolean).join("，");
+    lines.push(`先证者有 ${own.length} 段婚姻${detail ? `（${detail}）` : ""}。`);
+  }
+  return lines;
 }
 
 function showFamilyHistory() {

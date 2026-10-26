@@ -1,6 +1,17 @@
 import { PedigreeGraph } from "../model/pedigreeGraph";
 import { UnionNode } from "../model/union";
-import { BASE_MARRIAGE_GAP, BRANCHED_MARRIAGE_GAP, DUAL_ORIGIN_MARRIAGE_GAP, Box, createCoupleBox, createFamilyBox, createPersonBox } from "./boxModel";
+import {
+  BASE_MARRIAGE_GAP,
+  BRANCHED_MARRIAGE_GAP,
+  DUAL_ORIGIN_MARRIAGE_GAP,
+  Box,
+  HubInfo,
+  createCoupleBox,
+  createFamilyBox,
+  createHubFamilyBox,
+  createHubTopBox,
+  createPersonBox
+} from "./boxModel";
 import { sortChildrenForLayout } from "./childOrdering";
 
 export interface OriginLink {
@@ -54,6 +65,53 @@ export function buildForest(graph: PedigreeGraph): ForestBuildResult {
   const unionSortKey = (union: UnionNode) =>
     `${Math.min(...union.partners.map((id) => graph.persons.get(id)?.generation ?? 0))}:${union.partners.join("|")}:${union.id}`;
 
+  // 婚姻枢纽：出现在 ≥2 段双人婚姻中的人。其全部婚姻由一个枢纽盒子统一排布，
+  // 不再各自生成家庭块（否则同一个人会落在两个块里）。
+  const coupleUnionsOf = (personId: string) =>
+    (unionsByPartner.get(personId) ?? []).filter((union) => union.partners.length === 2);
+  const hubPeople = new Set(
+    [...graph.persons.keys()].filter((personId) => coupleUnionsOf(personId).length >= 2)
+  );
+  const hubUnionSortKey = (union: UnionNode) =>
+    `${String(union.order ?? Number.MAX_SAFE_INTEGER).padStart(12, "0")}:${union.id}`;
+  // 某段婚姻是否应留给对方（枢纽）来构建
+  const reservedForHub = (union: UnionNode, personId: string) =>
+    union.partners.length === 2 &&
+    !hubPeople.has(personId) &&
+    union.partners.some((partnerId) => partnerId !== personId && hubPeople.has(partnerId));
+
+  const buildChildBoxes = (union: UnionNode): Box[] => {
+    const children: Box[] = [];
+    for (const childId of sortedChildren(graph, union.id)) {
+      const child = graph.persons.get(childId);
+      if (!child) continue;
+
+      const childUnions = (unionsByPartner.get(childId) ?? [])
+        .filter((childUnion) =>
+          childUnion.id !== union.id &&
+          !visitedUnions.has(childUnion.id) &&
+          !reservedForHub(childUnion, childId)
+        )
+        .sort((a, b) => unionSortKey(a).localeCompare(unionSortKey(b)));
+      if (childUnions.length > 0 && !visitedMainPeople.has(childId)) {
+        visitedMainPeople.add(childId);
+        if (hubPeople.has(childId) && childUnions.filter((u) => u.partners.length === 2).length >= 2) {
+          const hubFamily = buildHub(childId, childUnions);
+          if (hubFamily) children.push(hubFamily);
+          continue;
+        }
+        for (const childUnion of childUnions) {
+          const childFamily = buildFamily(childUnion, childId);
+          if (childFamily) children.push(childFamily);
+        }
+      } else if (!visitedMainPeople.has(childId)) {
+        visitedMainPeople.add(childId);
+        children.push(createPersonBox(childId, child.generation ?? 0));
+      }
+    }
+    return children;
+  };
+
   const buildFamily = (union: UnionNode, mainPersonId?: string): Box | null => {
     if (visitedUnions.has(union.id)) return null;
     visitedUnions.add(union.id);
@@ -77,28 +135,54 @@ export function buildForest(graph: PedigreeGraph): ForestBuildResult {
     if (mainPersonId) visitedMainPeople.add(mainPersonId);
     else union.partners.forEach((partnerId) => visitedMainPeople.add(partnerId));
 
-    const children: Box[] = [];
-    for (const childId of sortedChildren(graph, union.id)) {
-      const child = graph.persons.get(childId);
-      if (!child) continue;
-
-      const childUnions = (unionsByPartner.get(childId) ?? [])
-        .filter((childUnion) => childUnion.id !== union.id && !visitedUnions.has(childUnion.id))
-        .sort((a, b) => unionSortKey(a).localeCompare(unionSortKey(b)));
-      if (childUnions.length > 0 && !visitedMainPeople.has(childId)) {
-        visitedMainPeople.add(childId);
-        for (const childUnion of childUnions) {
-          const childFamily = buildFamily(childUnion, childId);
-          if (childFamily) children.push(childFamily);
-        }
-      } else if (!visitedMainPeople.has(childId)) {
-        visitedMainPeople.add(childId);
-        children.push(createPersonBox(childId, child.generation ?? 0));
-      }
-    }
-
-    return createFamilyBox(top, children, mainId);
+    return createFamilyBox(top, buildChildBoxes(union), mainId);
   };
+
+  const buildHub = (personId: string, unions: UnionNode[]): Box | null => {
+    const hubUnions = unions
+      .filter((union) => union.partners.length === 2 && !visitedUnions.has(union.id))
+      .sort((a, b) => hubUnionSortKey(a).localeCompare(hubUnionSortKey(b)));
+    if (hubUnions.length < 2) return null;
+    hubUnions.forEach((union) => visitedUnions.add(union.id));
+    visitedMainPeople.add(personId);
+
+    const generation = Math.max(
+      ...hubUnions.flatMap((union) => union.partners.map((id) => graph.persons.get(id)?.generation ?? 0))
+    );
+    const spouses = hubUnions.map((union) => union.partners.find((partnerId) => partnerId !== personId) as string);
+    // 只支持一位有原生家庭的配偶挂 origin link；其余有父母的配偶仍按共享成员处理（已知限制）
+    const originOf = spouses.find((spouseId) => hasParents(spouseId));
+    spouses.forEach((spouseId) => { if (!hasParents(spouseId)) visitedMainPeople.add(spouseId); });
+
+    const hub: HubInfo = {
+      personId,
+      unions: hubUnions.map((union, index) => ({
+        unionId: union.id,
+        partnerId: spouses[index],
+        marriageGap: marriageGapForUnion(graph, parentUnionByChild, union, spouses[index] === originOf ? originOf : undefined),
+        children: [] as Box[]
+      }))
+    };
+    const top = createHubTopBox(hub, generation, originOf);
+    if (top.originOf) {
+      pendingOriginLinks.push({ couple: top, sharedPersonId: top.originOf });
+    }
+    hub.unions.forEach((group, index) => {
+      group.children = buildChildBoxes(hubUnions[index]);
+    });
+    return createHubFamilyBox(top, hub);
+  };
+
+  // 根级枢纽（本人没有父母）先于普通根婚姻构建，避免其中某段婚姻被当成普通根家庭
+  const rootHubPeople = [...hubPeople]
+    .filter((personId) => !hasParents(personId))
+    .sort((a, b) =>
+      (graph.persons.get(a)?.generation ?? 0) - (graph.persons.get(b)?.generation ?? 0) || a.localeCompare(b)
+    );
+  for (const personId of rootHubPeople) {
+    const root = buildHub(personId, coupleUnionsOf(personId));
+    if (root) roots.push(root);
+  }
 
   for (const union of [...graph.unions.values()].sort((a, b) => unionSortKey(a).localeCompare(unionSortKey(b)))) {
     if (!isRootUnion(union)) continue;
@@ -130,7 +214,7 @@ export function buildForest(graph: PedigreeGraph): ForestBuildResult {
 export function formatForest(boxes: Box[], depth = 0): string {
   const indent = "  ".repeat(depth);
   return boxes.map((box) => {
-    const label = `${indent}${box.kind} [${box.members.join(", ")}] width=${box.width}`;
+    const label = `${indent}${box.hub ? "hub" : box.kind} [${box.members.join(", ")}] width=${box.width}`;
     const origin = box.originOf ? ` originOf=${box.originOf}` : "";
     const children = box.children?.length ? `\n${formatForest(box.children, depth + 1)}` : "";
     const top = box.top ? `\n${formatForest([box.top], depth + 1)}` : "";

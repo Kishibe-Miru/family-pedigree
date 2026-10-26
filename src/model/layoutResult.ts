@@ -2,8 +2,24 @@ import { Sex } from "./person";
 
 export interface LayoutInput {
   persons: Array<{ id: string; sex: Sex; birthOrder?: number; twinGroup?: string; twinType?: "fraternal" | "identical" }>;
-  unions: Array<{ id: string; partners: string[]; consanguineous?: boolean }>;
+  unions: Array<{
+    id: string;
+    partners: string[];
+    consanguineous?: boolean;
+    status?: UnionStatus;
+    order?: number;
+  }>;
   childrenMap: Array<[string, string[]]>;
+}
+
+export type UnionStatus = "partner" | "separated" | "divorced";
+
+export type MarriageMarkKind = "separated" | "divorced";
+
+export interface MarriageMark {
+  kind: MarriageMarkKind;
+  x: number;
+  y: number;
 }
 
 export interface LayoutPosition {
@@ -40,6 +56,8 @@ export interface RelationshipSegment {
   twinGroup?: string;
   points: Array<{ x: number; y: number }>;
   doubleLine?: boolean;
+  status?: UnionStatus;
+  marks?: MarriageMark[];
   source?: {
     unionId?: string;
     parentIds?: string[];

@@ -5,8 +5,10 @@ import {
   LayoutInput,
   LayoutNode,
   LayoutResult,
+  MarriageMark,
   RelationshipSegment,
-  UnionAnchor
+  UnionAnchor,
+  UnionStatus
 } from "../model/layoutResult";
 import { PedigreeGraph } from "../model/pedigreeGraph";
 import { GraphValidationError, validateGraph } from "../rules/validation";
@@ -15,6 +17,8 @@ const R = NODE_SIZE / 2;
 const SIBSHIP_DROP = NODE_SIZE * 1.25;
 const ROUTED_MARRIAGE_DROP = NODE_SIZE * 1.65;
 const MIN_PARENT_DROP = NODE_SIZE * 0.65;
+// 离婚两道斜杠的间距
+const MARRIAGE_MARK_SPACING = 8;
 
 export interface FinalizeLayoutPerson {
   id: string;
@@ -133,7 +137,8 @@ export function graphFromLayout(
       union.id,
       {
         id: union.id,
-        partners: normalizePartners(union)
+        partners: normalizePartners(union),
+        ...(Number.isFinite(union.order) ? { order: union.order } : {})
       }
     ])),
     childrenMap: new Map(childrenMap.map(([unionId, childIds]) => [unionId, [...childIds]]))
@@ -261,6 +266,8 @@ function buildRelationshipSegments(
         : [partners[1], partners[0]];
       const points = marriageLinePoints(graph, left, right, parentIds, childIds);
       marriageLines.set(union.id, points);
+      const inputUnion = inputUnions.get(union.id);
+      const status = normalizeUnionStatus(inputUnion?.status);
       segments.push({
         id: `${union.id}:marriage`,
         type: "marriage",
@@ -274,7 +281,9 @@ function buildRelationshipSegments(
           personIds: parentIds
         },
         points,
-        doubleLine: !!inputUnions.get(union.id)?.consanguineous
+        doubleLine: !!inputUnion?.consanguineous,
+        status,
+        marks: buildMarriageMarks(graph, union.id, status, points, childIds.length > 0, left, right)
       });
     }
 
@@ -408,6 +417,46 @@ function buildRelationshipSegments(
   }
 
   return applyParentDropDetours(segments);
+}
+
+function normalizeUnionStatus(status: unknown): UnionStatus {
+  return status === "separated" || status === "divorced" ? status : "partner";
+}
+
+// 离婚 / 分居斜杠：画在婚配线的水平段上，靠近"非多段婚姻方"，并避开子女下降线。
+// 分居 1 道，离婚 2 道；具体线条几何由渲染层按 (x, y) 生成。
+function buildMarriageMarks(
+  graph: PedigreeGraph,
+  unionId: string,
+  status: UnionStatus,
+  points: Array<{ x: number; y: number }>,
+  hasChildren: boolean,
+  left: PersonWithCoordinates,
+  right: PersonWithCoordinates
+): MarriageMark[] {
+  if (status === "partner") return [];
+  const descent = marriageDescentStart(points);
+  if (!descent) return [];
+  const unionCount = (personId: string) =>
+    [...graph.unions.values()].filter((union) => union.id !== unionId && union.partners.includes(personId)).length;
+  // 优先把标记放在"只有这一段婚姻的人"那一侧；两人都只有一段婚姻时放在左侧（男方侧）。
+  const outerSide: "left" | "right" = unionCount(left.id) > unionCount(right.id) ? "right" : "left";
+  const outer = outerSide === "left" ? left : right;
+  const lineY = descent.y;
+  const routed = Math.abs(lineY - left.y) >= 0.5;
+  // 直连时从符号边缘量起；绕行时水平段从符号正下方开始，可直接用符号中心量起。
+  const edgeX = routed ? outer.x : (outerSide === "left" ? outer.x + R : outer.x - R);
+  const dropX = hasChildren ? descent.x : (left.x + right.x) / 2;
+  const centerX = hasChildren ? (edgeX + dropX) / 2 : dropX;
+  const available = Math.abs(dropX - edgeX);
+  const count = status === "divorced" ? 2 : 1;
+  const spacing = Math.min(MARRIAGE_MARK_SPACING, Math.max(6, available / 3));
+  const marks: MarriageMark[] = [];
+  for (let index = 0; index < count; index++) {
+    const offset = (index - (count - 1) / 2) * spacing;
+    marks.push({ kind: status, x: centerX + offset, y: lineY });
+  }
+  return marks;
 }
 
 function marriageDescentStart(points?: Array<{ x: number; y: number }>) {

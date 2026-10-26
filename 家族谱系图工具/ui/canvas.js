@@ -56,7 +56,24 @@ function drawRelationships(root, ctx) {
     if (segment.doubleLine) {
       drawSegment(root, offsetSegment(segment, 3), segmentClass(segment));
     }
+    (segment.marks || []).forEach((mark) => drawMarriageMark(root, segment, mark));
   });
+}
+
+// 离婚 / 分居斜杠：坐标由引擎算好（segment.marks），这里只画线条。
+// 几何与 src/render/svgRenderer.ts 保持一致：半宽 4、半高 8。
+const MARK_HALF_WIDTH = 4;
+const MARK_HALF_HEIGHT = 8;
+
+function drawMarriageMark(root, segment, mark) {
+  root.appendChild(svgEl("line", {
+    x1: mark.x - MARK_HALF_WIDTH,
+    y1: mark.y + MARK_HALF_HEIGHT,
+    x2: mark.x + MARK_HALF_WIDTH,
+    y2: mark.y - MARK_HALF_HEIGHT,
+    class: `marriage-mark marriage-mark-${mark.kind}`,
+    "data-union": segment.unionId || ""
+  }));
 }
 
 function drawSegment(root, segment, className) {
@@ -250,7 +267,9 @@ function drawLegend(root, ctx) {
     { kind: "deceased", text: "已故（／）" },
     { kind: "proband", text: "先证者（箭头 P）" },
     { kind: "twin", text: "双胞胎（同卵带横杆）" },
-    { kind: "consang", text: "近亲婚配（双线）" }
+    { kind: "consang", text: "近亲婚配（双线）" },
+    { kind: "separated", text: "分居（一道斜杠）" },
+    { kind: "divorced", text: "离婚（两道斜杠）" }
   ];
   const boxW = 188;
   const boxH = items.length * rowH + 36;
@@ -281,6 +300,12 @@ function drawLegendItem(group, item, x, cy) {
   } else if (item.kind === "consang") {
     group.appendChild(svgEl("line", { x1: sx - r, y1: cy - 2, x2: sx + r, y2: cy - 2, stroke: "#2f3a42", "stroke-width": 2 }));
     group.appendChild(svgEl("line", { x1: sx - r, y1: cy + 2, x2: sx + r, y2: cy + 2, stroke: "#2f3a42", "stroke-width": 2 }));
+  } else if (item.kind === "separated" || item.kind === "divorced") {
+    group.appendChild(svgEl("line", { x1: sx - r - 4, y1: cy, x2: sx + r + 4, y2: cy, stroke: "#2f3a42", "stroke-width": 2 }));
+    const offsets = item.kind === "divorced" ? [-4, 4] : [0];
+    offsets.forEach((dx) => {
+      group.appendChild(svgEl("line", { x1: sx + dx - 3, y1: cy + 6, x2: sx + dx + 3, y2: cy - 6, stroke: "#2f3a42", "stroke-width": 2, "stroke-linecap": "round" }));
+    });
   }
   group.appendChild(svgEl("text", { x: x + 44, y: cy, class: "legend-text" }, item.text));
 }
