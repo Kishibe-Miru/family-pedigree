@@ -47,12 +47,12 @@ C:\Apache24\htdocs\pedigree\styles.css
 C:\Apache24\htdocs\pedigree\ui\canvas.js
 ```
 
-也可以在 Apache 配置中使用 Alias 指向项目目录：
+也可以在 Apache 配置中使用 Alias 指向项目目录（把示例路径换成本机仓库中 `家族谱系图工具/` 的实际位置）：
 
 ```apache
-Alias /pedigree/ "I:/AI文件夹/AI Files/Codex/2605家族谱系图/家族谱系图工具/"
+Alias /pedigree/ "D:/pedigree/家族谱系图工具/"
 
-<Directory "I:/AI文件夹/AI Files/Codex/2605家族谱系图/家族谱系图工具/">
+<Directory "D:/pedigree/家族谱系图工具/">
     Options Indexes FollowSymLinks
     AllowOverride None
     Require all granted
